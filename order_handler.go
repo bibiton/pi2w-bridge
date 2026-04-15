@@ -765,18 +765,20 @@ func (oh *OrderHandler) cancelOrder(orderID string) {
 
 // handleFloorChange executes the full elevator flow to move the robot between floors.
 //
-// Flow:
-//  1. Navigate to current floor's elevator hall station
-//  2. switchMap to elevator tunnel map
-//  3. SetInitialPose at tunnel's elevator hall point
-//  4. Call elevator to current floor (via VDA5050 MQTT)
-//  5. Wait for elevator arrival
-//  6. Enter elevator (navigate to first available car station)
-//  7. Notify elevator to go to target floor (via VDA5050 MQTT)
-//  8. Wait for elevator arrival at target floor
-//  9. Exit elevator (navigate to tunnel hall point)
-//  10. switchMap to target floor map
-//  11. SetInitialPose at target floor's elevator hall point
+// Flow (aligned with NexOS IoT Gateway v2 state machine):
+//  1.   Navigate to current floor's elevator hall station
+//  2.   switchMap to elevator tunnel map
+//  3.   SetInitialPose at tunnel's elevator hall point
+//  3.5  Re-select delivery mode
+//  4+5. tw_elevator_call → blocks until elevator arrives at current floor (FINISHED)
+//  5.5  Connect elevator WiFi
+//  6a.  Navigate into elevator car
+//  6b.  tw_elevator_enter → blocks until elevator arrives at target floor ("please exit" RUNNING)
+//  9.   Navigate out of elevator to tunnel hall + tw_elevator_exit (FINISHED)
+//  9.5  Disconnect elevator WiFi
+//  10.  switchMap to target floor map
+//  11.  SetInitialPose at target floor's elevator hall point
+//  11.5 Re-select delivery mode
 func (oh *OrderHandler) handleFloorChange(orderID, fromMapID, toMapID string, cancelCh chan struct{}) error {
 	fromFloor := oh.elevatorCfg.GetFloor(fromMapID)
 	toFloor := oh.elevatorCfg.GetFloor(toMapID)
@@ -799,7 +801,7 @@ func (oh *OrderHandler) handleFloorChange(orderID, fromMapID, toMapID string, ca
 	if err := oh.doSwitchMap(ev.TunnelMap); err != nil {
 		return fmt.Errorf("switch to tunnel map: %w", err)
 	}
-	log.Printf("[Elevator] Step 2: Map switched to tunnel, waiting for core restart...")
+	log.Printf("[Elevator] Step 2: Map switched to tunnel")
 
 	// Step 3: SetInitialPose at tunnel hall point
 	log.Printf("[Elevator] Step 3: SetInitialPose at tunnel hall '%s'", ev.Hall)
@@ -868,17 +870,11 @@ func (oh *OrderHandler) handleFloorChange(orderID, fromMapID, toMapID string, ca
 		return fmt.Errorf("enter elevator: %w", err)
 	}
 	log.Printf("[Elevator] Step 6a: Inside elevator car A")
-	log.Printf("[Elevator] Step 6b: Notifying IoT Gateway (tw_elevator_enter)")
-	if err := oh.bridge.elevatorService.EnterElevator(elevatorID); err != nil {
-		log.Printf("[Elevator] Step 6b: enter notify failed (non-fatal): %v", err)
-	}
-	log.Printf("[Elevator] Step 6b: Enter notification done")
 
-	// Step 7+8: Send elevator to target floor via tw_elevator_call (reuse call for go)
-	log.Printf("[Elevator] Step 7: Requesting elevator to go to floor %d", toFloor.Floor)
-	// The IoT Gateway handles the "go" via another call with same elevator
-	if err := oh.bridge.elevatorService.CallElevator(elevatorID, fromFloor.Floor, toFloor.Floor); err != nil {
-		return fmt.Errorf("send elevator to target floor: %w", err)
+	// Step 6b+7+8: Notify IoT Gateway robot entered → elevator departs → wait for "please exit" signal
+	log.Printf("[Elevator] Step 6b: Notifying IoT Gateway (tw_elevator_enter), waiting for arrival at floor %d...", toFloor.Floor)
+	if err := oh.bridge.elevatorService.EnterElevator(elevatorID); err != nil {
+		return fmt.Errorf("elevator travel: %w", err)
 	}
 	log.Printf("[Elevator] Step 8: Elevator arrived at floor %d", toFloor.Floor)
 
@@ -955,21 +951,15 @@ func (oh *OrderHandler) doSwitchMap(mapID string) error {
 	resp.Body.Close()
 	log.Printf("[SwitchMap] Map parameter set to %s (elapsed: %v)", mapID, time.Since(switchStart))
 
-	// Step 2: Wait for map_loaded — dual approach: webhook channel + polling routing status API
-	oh.state.DrainMapLoaded()
-	mapLoadTimeout := time.NewTimer(90 * time.Second)
-	defer mapLoadTimeout.Stop()
-	pollTicker := time.NewTicker(3 * time.Second)
-	defer pollTicker.Stop()
-
+	// Step 2: Wait for map_loaded by polling routing status (up to 90s)
 	statusURL := oh.cfg.RobotBaseURL() + "/service/system/routing/status/get"
-	mapLoaded := false
-	for !mapLoaded {
+	deadline := time.After(90 * time.Second)
+	for {
 		select {
-		case <-oh.state.MapLoadedCh:
-			log.Printf("[SwitchMap] map_loaded received via webhook (elapsed: %v)", time.Since(switchStart))
-			mapLoaded = true
-		case <-pollTicker.C:
+		case <-deadline:
+			log.Printf("[SwitchMap] WARNING: map_loaded timeout (90s), proceeding anyway")
+			goto mapReady
+		case <-time.After(3 * time.Second):
 			if resp, err := oh.client.Get(statusURL); err == nil {
 				var sr map[string]interface{}
 				if json.NewDecoder(resp.Body).Decode(&sr) == nil {
@@ -978,19 +968,16 @@ func (oh *OrderHandler) doSwitchMap(mapID string) error {
 						status, _ = rs["status"].(string)
 					}
 					if status == "map_loaded" {
-						log.Printf("[SwitchMap] map_loaded detected via polling (elapsed: %v)", time.Since(switchStart))
-						mapLoaded = true
-					} else {
-						log.Printf("[SwitchMap] polling route_status=%s (elapsed: %v)", status, time.Since(switchStart))
+						log.Printf("[SwitchMap] map_loaded detected (elapsed: %v)", time.Since(switchStart))
+						goto mapReady
 					}
+					log.Printf("[SwitchMap] polling route_status=%s (elapsed: %v)", status, time.Since(switchStart))
 				}
 				resp.Body.Close()
 			}
-		case <-mapLoadTimeout.C:
-			log.Printf("[SwitchMap] WARNING: map_loaded timeout (90s), proceeding anyway")
-			mapLoaded = true
 		}
 	}
+mapReady:
 
 	// Step 3: select_mode delivery + wait for ready
 	deliveryPayload, _ := json.Marshal(map[string]string{"select_mode": "delivery"})

@@ -234,8 +234,8 @@ func (es *ElevatorService) CallElevator(elevatorID string, fromFloor, toFloor in
 
 	es.publishTwAction(actionID, "tw_elevator_call", []map[string]interface{}{
 		{"key": "elevatorId", "value": elevatorID},
-		{"key": "fromFloor", "value": fromFloor},
-		{"key": "toFloor", "value": toFloor},
+		{"key": "currentFloor", "value": fromFloor},
+		{"key": "targetFloor", "value": toFloor},
 	})
 	log.Printf("[ElevatorSvc] Sent tw_elevator_call: elevator=%s from=%d to=%d (actionId=%s)",
 		elevatorID[:8], fromFloor, toFloor, actionID)
@@ -252,8 +252,13 @@ func (es *ElevatorService) CallElevator(elevatorID string, fromFloor, toFloor in
 	return nil
 }
 
-// EnterElevator sends tw_elevator_enter to notify IoT Gateway that the robot is entering.
-// The IoT Gateway will keep the door open during this phase.
+// EnterElevator sends tw_elevator_enter to notify IoT Gateway that the robot has entered.
+// IoT Gateway responds with:
+//   - RUNNING "entered, moving to floor X" — elevator departing
+//   - RUNNING "arrived at floor X, please exit" — elevator arrived at target floor
+//
+// This method blocks until the "please exit" RUNNING signal is received,
+// which means the elevator has arrived at the target floor.
 func (es *ElevatorService) EnterElevator(elevatorID string) error {
 	actionID := fmt.Sprintf("ev_enter_%d", time.Now().UnixMilli())
 
@@ -266,7 +271,9 @@ func (es *ElevatorService) EnterElevator(elevatorID string) error {
 	log.Printf("[ElevatorSvc] Sent tw_elevator_enter: elevator=%s (actionId=%s)",
 		elevatorID[:8], actionID)
 
-	resp, err := es.waitResponse(respCh, 2*time.Minute)
+	// Wait for "please exit" signal (RUNNING) or terminal state (FINISHED/FAILED)
+	// The "please exit" arrives when elevator reaches the target floor
+	resp, err := es.waitResponse(respCh, 5*time.Minute)
 	if err != nil {
 		return fmt.Errorf("enter elevator: %w", err)
 	}
@@ -274,7 +281,8 @@ func (es *ElevatorService) EnterElevator(elevatorID string) error {
 		return fmt.Errorf("enter elevator FAILED: %s", resp.ResultDescription)
 	}
 
-	log.Printf("[ElevatorSvc] tw_elevator_enter FINISHED: %s", resp.ResultDescription)
+	log.Printf("[ElevatorSvc] tw_elevator_enter response: status=%s desc=%s",
+		resp.ActionStatus, resp.ResultDescription)
 	return nil
 }
 
@@ -376,12 +384,17 @@ func (es *ElevatorService) HandleActionStates(states []ActionStateMsg) {
 	defer es.pendingMu.Unlock()
 
 	for _, s := range states {
+		log.Printf("[ElevatorSvc] ActionState: id=%s type=%s status=%s desc=%s",
+			s.ActionID, s.ActionType, s.ActionStatus, s.ResultDescription)
+
 		ch, ok := es.pending[s.ActionID]
 		if !ok {
 			continue
 		}
-		// Only forward terminal states
-		if s.ActionStatus == "FINISHED" || s.ActionStatus == "FAILED" {
+		// Forward terminal states (FINISHED/FAILED) and significant RUNNING states
+		// IoT Gateway sends RUNNING with "please exit" when elevator arrives at target floor
+		if s.ActionStatus == "FINISHED" || s.ActionStatus == "FAILED" ||
+			(s.ActionStatus == "RUNNING" && strings.Contains(s.ResultDescription, "please exit")) {
 			select {
 			case ch <- s:
 			default:

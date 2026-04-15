@@ -57,9 +57,6 @@ type RobotState struct {
 	// Navigation completion notification (set by webhook, read by order handler)
 	NavArrivedCh chan struct{}
 
-	// Map loaded notification (set by webhook on map_loaded event, read by doSwitchMap)
-	MapLoadedCh chan struct{}
-
 	// Map list
 	MapList []string
 
@@ -115,7 +112,6 @@ func NewRobotState() *RobotState {
 		Loads:           []interface{}{},
 		MapList:         []string{},
 		NavArrivedCh:    make(chan struct{}, 1),
-		MapLoadedCh:     make(chan struct{}, 1),
 	}
 }
 
@@ -342,18 +338,4 @@ func (rs *RobotState) DrainNavArrived() {
 	}
 }
 
-// NotifyMapLoaded sends a non-blocking signal that map has been loaded.
-func (rs *RobotState) NotifyMapLoaded() {
-	select {
-	case rs.MapLoadedCh <- struct{}{}:
-	default:
-	}
-}
 
-// DrainMapLoaded clears any pending map loaded signal.
-func (rs *RobotState) DrainMapLoaded() {
-	select {
-	case <-rs.MapLoadedCh:
-	default:
-	}
-}

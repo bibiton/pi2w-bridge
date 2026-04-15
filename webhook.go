@@ -118,8 +118,7 @@ func (ws *WebhookServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 				s, _ := rs["status"].(string)
 				log.Printf("[Webhook] route_status=%s", s)
 				if s == "map_loaded" {
-					log.Printf("[Webhook] map_loaded event received, notifying MapLoadedCh")
-					ws.state.NotifyMapLoaded()
+					log.Printf("[Webhook] map_loaded event received")
 					go func() {
 						if name := queryATOMCurrentMap(ws.cfg); name != "" {
 							ws.state.SetMapID(name)
