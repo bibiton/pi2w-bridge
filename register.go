@@ -156,36 +156,8 @@ func activateDeliveryMode(cfg *Config) {
 
 	time.Sleep(2 * time.Second)
 
-	// Always restart robot core to ensure clean state (even if already in delivery mode,
-	// the core may be in a stale state from previous map switches)
-	log.Println("[Delivery] Stopping robot core for clean restart...")
-	stopPayload, _ := json.Marshal(map[string]string{"robot_control": "stop_robot_core"})
-	resp, err := client.Post(commandURL, "application/json", bytes.NewReader(stopPayload))
-	if err != nil {
-		log.Printf("[Delivery] stop_robot_core failed: %v", err)
-	} else {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		log.Printf("[Delivery] stop_robot_core → HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	// Wait for core to stop (node_manager may auto-restart via .bashrc)
-	log.Println("[Delivery] Waiting 10s for core to stop...")
-	time.Sleep(10 * time.Second)
-
-	// Start robot core
-	log.Println("[Delivery] Sending start_robot_core...")
-	startPayload, _ := json.Marshal(map[string]string{"robot_control": "start_robot_core"})
-	resp, err = client.Post(commandURL, "application/json", bytes.NewReader(startPayload))
-	if err != nil {
-		log.Printf("[Delivery] start_robot_core failed: %v", err)
-	} else {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		log.Printf("[Delivery] start_robot_core → HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
 	// Wait for map_loaded by polling routing status (up to 90s)
+	// No robot_core restart needed — set/map API handles switching directly
 	log.Println("[Delivery] Waiting for map_loaded...")
 	statusURL := baseURL + "/service/system/routing/status/get"
 	mapLoadDeadline := time.NewTimer(90 * time.Second)

@@ -934,14 +934,12 @@ func (oh *OrderHandler) handleFloorChange(orderID, fromMapID, toMapID string, ca
 }
 
 // doSwitchMap executes the ATOM API map switch sequence:
-// 1. set map parameter → sleep 2s
-// 2. stop_robot_core → sleep 5s
-// 3. DrainMapLoaded (clear stale signals from set map / stop)
-// 4. start_robot_core
-// 5. wait for map_loaded event (timeout 120s)
-// 6. sleep 3s (stabilization buffer)
-// 7. select_mode delivery
-// 8. state.SetMapID(mapID)
+// 1. set map parameter
+// 2. wait for map_loaded (polling routing status, up to 90s)
+// 3. select_mode delivery + wait 5s
+// 4. state.SetMapID(mapID)
+//
+// No robot_core restart needed — the ATOM API handles map switching internally.
 func (oh *OrderHandler) doSwitchMap(mapID string) error {
 	switchStart := time.Now()
 	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
@@ -957,36 +955,11 @@ func (oh *OrderHandler) doSwitchMap(mapID string) error {
 	resp.Body.Close()
 	log.Printf("[SwitchMap] Map parameter set to %s (elapsed: %v)", mapID, time.Since(switchStart))
 
-	time.Sleep(2 * time.Second)
-
-	// Step 2: stop_robot_core
-	stopPayload, _ := json.Marshal(map[string]string{"robot_control": "stop_robot_core"})
-	resp, err = oh.client.Post(commandURL, "application/json", bytes.NewReader(stopPayload))
-	if err != nil {
-		return fmt.Errorf("stop_robot_core: %w", err)
-	}
-	resp.Body.Close()
-	log.Printf("[SwitchMap] stop_robot_core sent (elapsed: %v)", time.Since(switchStart))
-
-	time.Sleep(5 * time.Second)
-
-	// Step 3: Drain stale map_loaded signals (set map and stop may trigger map_loaded)
+	// Step 2: Wait for map_loaded — dual approach: webhook channel + polling routing status API
 	oh.state.DrainMapLoaded()
-	log.Printf("[SwitchMap] Drained stale map_loaded signals (elapsed: %v)", time.Since(switchStart))
-
-	// Step 4: start_robot_core
-	startPayload, _ := json.Marshal(map[string]string{"robot_control": "start_robot_core"})
-	resp, err = oh.client.Post(commandURL, "application/json", bytes.NewReader(startPayload))
-	if err != nil {
-		return fmt.Errorf("start_robot_core: %w", err)
-	}
-	resp.Body.Close()
-	log.Printf("[SwitchMap] start_robot_core sent, waiting for map_loaded event... (elapsed: %v)", time.Since(switchStart))
-
-	// Step 5: Wait for map_loaded — dual approach: webhook channel + polling routing status API
-	mapLoadTimeout := time.NewTimer(120 * time.Second)
+	mapLoadTimeout := time.NewTimer(90 * time.Second)
 	defer mapLoadTimeout.Stop()
-	pollTicker := time.NewTicker(2 * time.Second)
+	pollTicker := time.NewTicker(3 * time.Second)
 	defer pollTicker.Stop()
 
 	statusURL := oh.cfg.RobotBaseURL() + "/service/system/routing/status/get"
@@ -997,11 +970,9 @@ func (oh *OrderHandler) doSwitchMap(mapID string) error {
 			log.Printf("[SwitchMap] map_loaded received via webhook (elapsed: %v)", time.Since(switchStart))
 			mapLoaded = true
 		case <-pollTicker.C:
-			// Poll routing status API as fallback
 			if resp, err := oh.client.Get(statusURL); err == nil {
 				var sr map[string]interface{}
 				if json.NewDecoder(resp.Body).Decode(&sr) == nil {
-					// API returns {"route_status": {"status": "map_loaded", ...}}
 					status := ""
 					if rs, ok := sr["route_status"].(map[string]interface{}); ok {
 						status, _ = rs["status"].(string)
@@ -1016,14 +987,12 @@ func (oh *OrderHandler) doSwitchMap(mapID string) error {
 				resp.Body.Close()
 			}
 		case <-mapLoadTimeout.C:
-			return fmt.Errorf("switchMap: map_loaded timeout (120s) for map=%s", mapID)
+			log.Printf("[SwitchMap] WARNING: map_loaded timeout (90s), proceeding anyway")
+			mapLoaded = true
 		}
 	}
 
-	// Step 6: Stabilization buffer (wait for Nav2 to fully initialize)
-	time.Sleep(5 * time.Second)
-
-	// Step 7: select_mode delivery
+	// Step 3: select_mode delivery + wait for ready
 	deliveryPayload, _ := json.Marshal(map[string]string{"select_mode": "delivery"})
 	resp, err = oh.client.Post(commandURL, "application/json", bytes.NewReader(deliveryPayload))
 	if err != nil {
@@ -1032,11 +1001,10 @@ func (oh *OrderHandler) doSwitchMap(mapID string) error {
 	resp.Body.Close()
 	log.Printf("[SwitchMap] select_mode delivery sent (elapsed: %v)", time.Since(switchStart))
 
-	// Step 8: Wait for delivery mode to be fully ready
 	time.Sleep(5 * time.Second)
 	log.Printf("[SwitchMap] Delivery mode ready (elapsed: %v)", time.Since(switchStart))
 
-	// Step 9: Update state
+	// Step 4: Update state
 	oh.state.SetMapID(mapID)
 	log.Printf("[SwitchMap] Completed: map=%s (total: %v)", mapID, time.Since(switchStart))
 	return nil
