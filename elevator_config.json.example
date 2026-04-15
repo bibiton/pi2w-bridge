@@ -1,0 +1,24 @@
+{
+  "floors": {
+    "20260326_shalun_250C_charge": {
+      "floor": 1,
+      "elevatorHall": "EV_hall_1F"
+    },
+    "map_2F": {
+      "floor": 2,
+      "elevatorHall": "EV_hall_2F"
+    },
+    "map_3F": {
+      "floor": 3,
+      "elevatorHall": "EV_hall_3F"
+    }
+  },
+  "elevator": {
+    "tunnelMap": "elevator_tunnel",
+    "hall": "EV_lobby",
+    "cars": {
+      "EV01": "EV01_inside",
+      "EV02": "EV02_inside"
+    }
+  }
+}

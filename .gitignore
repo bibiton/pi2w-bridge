@@ -1,0 +1,11 @@
+# Binaries
+pi2w-bridge
+pi2w-bridge-arm
+pi2w-bridge-arm7
+pi2w-helper-arm
+
+# Environment
+.env
+
+# MQTT config (contains credentials)
+mqtt_config.json

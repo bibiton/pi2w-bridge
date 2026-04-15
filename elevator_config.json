@@ -1,0 +1,16 @@
+{
+  "floors": {
+    "20260326_shalun_250C_charge": { "floor": 1, "elevatorHall": "A13", "elevatorHallYaw": 0 },
+    "20260309_part01_v2":          { "floor": 5, "elevatorHall": "A05", "elevatorHallYaw": 0 },
+    "6f_map":                      { "floor": 6, "elevatorHall": "A03", "elevatorHallYaw": 0 }
+  },
+  "elevator": {
+    "tunnelMap": "elevator_tunnel_v2",
+    "hall": "A03",
+    "cars": { "A": "A01", "B": "A02" },
+    "wifiNetworks": [
+      { "ssid": "owlsometech_stpi_1", "password": "V?jdC50Q" },
+      { "ssid": "owlsometech_stpi_2", "password": "V?jdC50Q" }
+    ]
+  }
+}
