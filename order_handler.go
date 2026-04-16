@@ -509,12 +509,13 @@ func (oh *OrderHandler) waitForNavigation(cancelCh chan struct{}) error {
 	}
 }
 
-// cancelRobotNav sends a stop command to ATOM API.
-// Uses ignore_state_control:"true" for consistency with other commands —
-// ATOM silently ignores many commands without it.
+// cancelRobotNav sends a delivery cancel command to ATOM API per API v1.0.7.
+// Uses the same string-payload pattern as goto_charging / leave_charger.
+// Verified via direct curl: delivery_command:"cancel" aborts the current
+// delivery/goto_charging/return task (e.g. robot backs off the charger).
 func (oh *OrderHandler) cancelRobotNav() {
 	payload, _ := json.Marshal(map[string]interface{}{
-		"routing_control":      "stop",
+		"delivery_command":     "cancel",
 		"ignore_state_control": "true",
 	})
 	url := oh.cfg.RobotBaseURL() + "/service/control/commands"
@@ -524,7 +525,7 @@ func (oh *OrderHandler) cancelRobotNav() {
 		return
 	}
 	resp.Body.Close()
-	log.Printf("[Order] Cancel nav sent to ATOM API")
+	log.Printf("[Order] Cancel nav sent to ATOM API (delivery_command:cancel)")
 }
 
 // actionStartCharging sends the ATOM goto_charging command (string payload
