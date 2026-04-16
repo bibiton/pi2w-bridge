@@ -509,46 +509,51 @@ func (oh *OrderHandler) cancelRobotNav() {
 	log.Printf("[Order] Cancel nav sent to ATOM API")
 }
 
-// actionStartCharging sends goto_charging to ATOM API, waits for navigation
-// to begin, then waits for the webhook show_charging event to confirm docking.
+// actionStartCharging executes the two-step charging docking sequence:
+//
+//  1. Navigate to the charging area via deliver_to_location["charge_station"]
+//     (object payload). Wait for status="arrived".
+//  2. Dock onto the charging pins via {"delivery_command":"goto_charging"}
+//     (STRING payload per ATOM API v1.0.7). Wait for show_charging webhook.
+//
+// Every delivery command carries ignore_state_control:"true" (matches the
+// reference robot_atom.py implementation — without it, ATOM accepts the
+// command but never acts on it).
 func (oh *OrderHandler) actionStartCharging(action *VDA5050Action, cancelCh chan struct{}) error {
 	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
 	statusURL := oh.cfg.RobotBaseURL() + "/service/system/routing/status/get"
 
-	// Step 1: POST deliver_to_location: charge_station
-	// ATOM's {"goto_charging":""} returns HTTP 200 but doesn't actually navigate.
-	// The working command is deliver_to_location with the station named "charge_station"
-	// (type=charging in the map's point table).
+	// Step 1: POST deliver_to_location charge_station (object format).
 	log.Printf("[Order] startCharging: sending deliver_to_location charge_station")
-	payload, _ := json.Marshal(map[string]interface{}{
+	payload1, _ := json.Marshal(map[string]interface{}{
 		"delivery_command": map[string]interface{}{
 			"deliver_to_location": []string{"charge_station"},
 		},
+		"ignore_state_control": "true",
 	})
-	resp, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(payload))
+	resp, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(payload1))
 	if err != nil {
-		return fmt.Errorf("startCharging: deliver_to_location charge_station request failed: %w", err)
+		return fmt.Errorf("startCharging: deliver_to_location request failed: %w", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("startCharging: deliver_to_location charge_station HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("startCharging: deliver_to_location HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Step 2: poll route_status — confirm robot starts navigating
-	log.Printf("[Order] startCharging: waiting for navigation to start...")
-	navTimeout := time.After(30 * time.Second)
+	// Step 2: poll route_status — wait until we arrive at charge_station.
+	log.Printf("[Order] startCharging: waiting for arrival at charge_station...")
+	navTimeout := time.After(5 * time.Minute)
 	navTicker := time.NewTicker(3 * time.Second)
 	defer navTicker.Stop()
 
-	navStarted := false
-	for !navStarted {
+	arrived := false
+	for !arrived {
 		select {
 		case <-cancelCh:
-			return fmt.Errorf("startCharging: cancelled during navigation wait")
+			return fmt.Errorf("startCharging: cancelled during navigation")
 		case <-navTimeout:
-			log.Printf("[Order] startCharging: navigation start timeout, proceeding anyway")
-			navStarted = true
+			return fmt.Errorf("startCharging: timed out navigating to charge_station (5 min)")
 		case <-navTicker.C:
 			if sr, err := oh.client.Get(statusURL); err == nil {
 				var result map[string]interface{}
@@ -557,8 +562,8 @@ func (oh *OrderHandler) actionStartCharging(action *VDA5050Action, cancelCh chan
 						status, _ := rs["status"].(string)
 						status = strings.ToLower(status)
 						log.Printf("[Order] startCharging: route_status=%s", status)
-						if status == "goto charging" || status == "delivering" || status == "goto_charging" {
-							navStarted = true
+						if status == "arrived" {
+							arrived = true
 						}
 					}
 				}
@@ -566,20 +571,36 @@ func (oh *OrderHandler) actionStartCharging(action *VDA5050Action, cancelCh chan
 			}
 		}
 	}
-	log.Printf("[Order] startCharging: robot navigating to charger")
+	log.Printf("[Order] startCharging: arrived at charge_station, initiating docking")
 
-	// Step 3: poll BatteryCharging (set by webhook show_charging)
-	log.Printf("[Order] startCharging: waiting for charging confirmation...")
-	chargeTimeout := time.After(5 * time.Minute)
+	// Step 3: POST goto_charging (STRING format per ATOM API v1.0.7) → triggers
+	// physical backward docking onto charging pins.
+	payload2, _ := json.Marshal(map[string]interface{}{
+		"delivery_command":     "goto_charging",
+		"ignore_state_control": "true",
+	})
+	resp, err = oh.client.Post(commandURL, "application/json", bytes.NewReader(payload2))
+	if err != nil {
+		return fmt.Errorf("startCharging: goto_charging request failed: %w", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("startCharging: goto_charging HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	log.Printf("[Order] startCharging: goto_charging sent, waiting for show_charging event...")
+
+	// Step 4: poll BatteryCharging (set by webhook event "show_charging").
+	chargeTimeout := time.After(3 * time.Minute)
 	chargeTicker := time.NewTicker(2 * time.Second)
 	defer chargeTicker.Stop()
 
 	for {
 		select {
 		case <-cancelCh:
-			return fmt.Errorf("startCharging: cancelled during charging wait")
+			return fmt.Errorf("startCharging: cancelled during docking")
 		case <-chargeTimeout:
-			return fmt.Errorf("startCharging: timed out waiting for charging (5 min)")
+			return fmt.Errorf("startCharging: timed out waiting for charging confirmation (3 min)")
 		case <-chargeTicker.C:
 			snap := oh.state.Snapshot()
 			if snap.BatteryCharging {
@@ -601,6 +622,7 @@ func (oh *OrderHandler) sendDeliveryWithRetry(stationName string) error {
 			"delivery_command": map[string]interface{}{
 				"deliver_to_location": []string{stationName},
 			},
+			"ignore_state_control": "true",
 		})
 
 		resp, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(payload))
@@ -1149,10 +1171,10 @@ func (oh *OrderHandler) ensureNotCharging(cancelCh chan struct{}) error {
 	log.Printf("[Order] Robot is charging, sending leave_charger before task execution")
 
 	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
+	// leave_charger uses string payload format per ATOM API v1.0.7.
 	payload, _ := json.Marshal(map[string]interface{}{
-		"delivery_command": map[string]interface{}{
-			"leave_charger": "",
-		},
+		"delivery_command":     "leave_charger",
+		"ignore_state_control": "true",
 	})
 	resp, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(payload))
 	if err != nil {

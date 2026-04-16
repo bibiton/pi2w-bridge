@@ -282,6 +282,7 @@ func (h *InstantActionHandler) handleNavigate(actionID string, params map[string
 		"delivery_command": map[string]interface{}{
 			"deliver_to_location": []string{target},
 		},
+		"ignore_state_control": "true",
 	})
 
 	url := h.cfg.RobotBaseURL() + "/service/control/commands"
