@@ -515,21 +515,24 @@ func (oh *OrderHandler) actionStartCharging(action *VDA5050Action, cancelCh chan
 	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
 	statusURL := oh.cfg.RobotBaseURL() + "/service/system/routing/status/get"
 
-	// Step 1: POST goto_charging
-	log.Printf("[Order] startCharging: sending goto_charging")
+	// Step 1: POST deliver_to_location: charge_station
+	// ATOM's {"goto_charging":""} returns HTTP 200 but doesn't actually navigate.
+	// The working command is deliver_to_location with the station named "charge_station"
+	// (type=charging in the map's point table).
+	log.Printf("[Order] startCharging: sending deliver_to_location charge_station")
 	payload, _ := json.Marshal(map[string]interface{}{
 		"delivery_command": map[string]interface{}{
-			"goto_charging": "",
+			"deliver_to_location": []string{"charge_station"},
 		},
 	})
 	resp, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("startCharging: goto_charging request failed: %w", err)
+		return fmt.Errorf("startCharging: deliver_to_location charge_station request failed: %w", err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("startCharging: goto_charging HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("startCharging: deliver_to_location charge_station HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	// Step 2: poll route_status — confirm robot starts navigating
