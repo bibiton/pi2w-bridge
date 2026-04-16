@@ -538,6 +538,15 @@ func (oh *OrderHandler) cancelRobotNav() {
 func (oh *OrderHandler) actionStartCharging(action *VDA5050Action, cancelCh chan struct{}) error {
 	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
 
+	// Fast path: if already charging, the goal is already achieved.
+	// Without this, goto_charging is a no-op (robot already on dock) and
+	// ATOM never re-fires the "show_charging" webhook, so we'd wait the
+	// full 5-minute timeout for nothing.
+	if snap := oh.state.Snapshot(); snap.BatteryCharging {
+		log.Printf("[Order] startCharging: robot already charging (battery=%.1f%%), skipping goto_charging", snap.BatteryPercent)
+		return nil
+	}
+
 	// POST {"delivery_command":"goto_charging","ignore_state_control":"true"}
 	// String payload (not object) — verified via direct curl that the object
 	// form {"delivery_command":{"goto_charging":""}} is a no-op.
@@ -1170,15 +1179,7 @@ func (oh *OrderHandler) ensureNotCharging(cancelCh chan struct{}) error {
 		case <-ticker.C:
 			snap := oh.state.Snapshot()
 			if !snap.BatteryCharging {
-				log.Printf("[Order] Robot left charger, re-selecting delivery mode")
-				// Re-select delivery mode to ensure navigation stack is ready
-				deliveryPayload, _ := json.Marshal(map[string]string{"select_mode": "delivery"})
-				if r, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(deliveryPayload)); err != nil {
-					log.Printf("[Order] ensureNotCharging: select_mode delivery failed: %v", err)
-				} else {
-					r.Body.Close()
-				}
-				log.Printf("[Order] ensureNotCharging: waiting 5s to stabilize")
+				log.Printf("[Order] Robot left charger, waiting 5s to stabilize")
 				select {
 				case <-cancelCh:
 					return fmt.Errorf("order cancelled while stabilizing after leaving charger")
