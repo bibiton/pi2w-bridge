@@ -54,13 +54,14 @@ func ApplyWebhookData(rs *RobotState, item map[string]interface{}) {
 	}
 
 	// --- Event ---
+	// ATOM API v1.0.7: "show_charging" = 充電中, "remove_charging" = 未充電
 	if evt, ok := item["event"]; ok {
 		switch v := evt.(type) {
 		case string:
 			rs.Event = v
 			if v == "show_charging" {
 				rs.BatteryCharging = true
-			} else if v == "hide_charging" || v == "" {
+			} else if v == "remove_charging" || v == "" {
 				rs.BatteryCharging = false
 			}
 		case map[string]interface{}:
@@ -68,6 +69,8 @@ func ApplyWebhookData(rs *RobotState, item map[string]interface{}) {
 				rs.Event = name
 				if name == "show_charging" {
 					rs.BatteryCharging = true
+				} else if name == "remove_charging" {
+					rs.BatteryCharging = false
 				}
 			}
 		}

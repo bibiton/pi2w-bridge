@@ -1162,7 +1162,7 @@ func (oh *OrderHandler) ensureNotCharging(cancelCh chan struct{}) error {
 	}
 	log.Printf("[Order] leave_charger sent (HTTP %d)", resp.StatusCode)
 
-	// Poll BatteryCharging == false (set by webhook hide_charging)
+	// Poll BatteryCharging == false (set by webhook event "remove_charging")
 	timeout := time.NewTimer(60 * time.Second)
 	defer timeout.Stop()
 	ticker := time.NewTicker(2 * time.Second)
