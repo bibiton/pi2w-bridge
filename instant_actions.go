@@ -305,8 +305,9 @@ func (h *InstantActionHandler) handleNavigate(actionID string, params map[string
 func (h *InstantActionHandler) handleCancelOrder(actionID string, params map[string]string) error {
 	log.Printf("[Action] cancelOrder: sending stop command to ATOM API")
 
-	payload, _ := json.Marshal(map[string]string{
-		"routing_control": "stop",
+	payload, _ := json.Marshal(map[string]interface{}{
+		"routing_control":      "stop",
+		"ignore_state_control": "true",
 	})
 
 	url := h.cfg.RobotBaseURL() + "/service/control/commands"

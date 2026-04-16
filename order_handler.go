@@ -190,6 +190,9 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 		snap := oh.state.Snapshot()
 		currentMapID = snap.MapID
 	}
+	// Remember origin map so we can return to the counter on the starting floor
+	// (e.g. cross-floor delivery: 1F -> 6F, then take elevator back to 1F counter).
+	originMapID := currentMapID
 
 	// Process remaining nodes (skip origin at index 0)
 	for i := 1; i < len(nodes); i++ {
@@ -292,6 +295,19 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 	case <-waitTimer.C:
 	}
 
+	// If waypoints finished on a different floor than where the order started,
+	// take the elevator back to the origin floor before returning to counter.
+	if currentMapID != originMapID && oh.elevatorCfg != nil && oh.elevatorCfg.NeedsFloorChange(currentMapID, originMapID) {
+		log.Printf("[Order] === Return trip: taking elevator back %s -> %s ===", currentMapID, originMapID)
+		if err := oh.handleFloorChange(order.OrderID, currentMapID, originMapID, cancelCh); err != nil {
+			log.Printf("[Order] Return floor change failed: %v", err)
+			oh.failOrder(order.OrderID, err.Error())
+			return
+		}
+		currentMapID = originMapID
+		log.Printf("[Order] === Back on origin floor %s ===", currentMapID)
+	}
+
 	// Navigate back to counter
 	log.Printf("[Order] Returning to counter station via ATOM API")
 	if err := oh.navigateToStation(order.OrderID, "counter", cancelCh); err != nil {
@@ -300,7 +316,7 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 		return
 	}
 
-	log.Printf("[Order] === Order %s completed (returned to counter) ===", order.OrderID)
+	log.Printf("[Order] === Order %s completed (returned to counter on floor %s) ===", order.OrderID, originMapID)
 	oh.finishOrder(order.OrderID)
 }
 
@@ -494,9 +510,12 @@ func (oh *OrderHandler) waitForNavigation(cancelCh chan struct{}) error {
 }
 
 // cancelRobotNav sends a stop command to ATOM API.
+// Uses ignore_state_control:"true" for consistency with other commands —
+// ATOM silently ignores many commands without it.
 func (oh *OrderHandler) cancelRobotNav() {
-	payload, _ := json.Marshal(map[string]string{
-		"routing_control": "stop",
+	payload, _ := json.Marshal(map[string]interface{}{
+		"routing_control":      "stop",
+		"ignore_state_control": "true",
 	})
 	url := oh.cfg.RobotBaseURL() + "/service/control/commands"
 	resp, err := oh.client.Post(url, "application/json", bytes.NewReader(payload))
