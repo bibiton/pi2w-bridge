@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -145,6 +146,15 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 	// Trigger state publish
 	oh.bridge.TriggerStatePublish()
 
+	// Non-charging task: ensure robot has left charger before proceeding
+	if order.TaskType != "charging" {
+		if err := oh.ensureNotCharging(cancelCh); err != nil {
+			log.Printf("[Order] Failed to leave charger: %v", err)
+			oh.failOrder(order.OrderID, err.Error())
+			return
+		}
+	}
+
 	// Sort nodes by sequenceId, edges by sequenceId
 	// Platform sends them in order, but let's be safe
 	nodes := order.Nodes
@@ -261,6 +271,13 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 		}
 
 		oh.bridge.TriggerStatePublish()
+	}
+
+	// Charging task — no counter return needed
+	if order.TaskType == "charging" {
+		log.Printf("[Order] === Charging task %s completed ===", order.OrderID)
+		oh.finishOrder(order.OrderID)
+		return
 	}
 
 	// All waypoint nodes processed — wait 30s then return to counter
@@ -492,6 +509,84 @@ func (oh *OrderHandler) cancelRobotNav() {
 	log.Printf("[Order] Cancel nav sent to ATOM API")
 }
 
+// actionStartCharging sends goto_charging to ATOM API, waits for navigation
+// to begin, then waits for the webhook show_charging event to confirm docking.
+func (oh *OrderHandler) actionStartCharging(action *VDA5050Action, cancelCh chan struct{}) error {
+	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
+	statusURL := oh.cfg.RobotBaseURL() + "/service/system/routing/status/get"
+
+	// Step 1: POST goto_charging
+	log.Printf("[Order] startCharging: sending goto_charging")
+	payload, _ := json.Marshal(map[string]interface{}{
+		"delivery_command": map[string]interface{}{
+			"goto_charging": "",
+		},
+	})
+	resp, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("startCharging: goto_charging request failed: %w", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("startCharging: goto_charging HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Step 2: poll route_status — confirm robot starts navigating
+	log.Printf("[Order] startCharging: waiting for navigation to start...")
+	navTimeout := time.After(30 * time.Second)
+	navTicker := time.NewTicker(3 * time.Second)
+	defer navTicker.Stop()
+
+	navStarted := false
+	for !navStarted {
+		select {
+		case <-cancelCh:
+			return fmt.Errorf("startCharging: cancelled during navigation wait")
+		case <-navTimeout:
+			log.Printf("[Order] startCharging: navigation start timeout, proceeding anyway")
+			navStarted = true
+		case <-navTicker.C:
+			if sr, err := oh.client.Get(statusURL); err == nil {
+				var result map[string]interface{}
+				if json.NewDecoder(sr.Body).Decode(&result) == nil {
+					if rs, ok := result["route_status"].(map[string]interface{}); ok {
+						status, _ := rs["status"].(string)
+						status = strings.ToLower(status)
+						log.Printf("[Order] startCharging: route_status=%s", status)
+						if status == "goto charging" || status == "delivering" || status == "goto_charging" {
+							navStarted = true
+						}
+					}
+				}
+				sr.Body.Close()
+			}
+		}
+	}
+	log.Printf("[Order] startCharging: robot navigating to charger")
+
+	// Step 3: poll BatteryCharging (set by webhook show_charging)
+	log.Printf("[Order] startCharging: waiting for charging confirmation...")
+	chargeTimeout := time.After(5 * time.Minute)
+	chargeTicker := time.NewTicker(2 * time.Second)
+	defer chargeTicker.Stop()
+
+	for {
+		select {
+		case <-cancelCh:
+			return fmt.Errorf("startCharging: cancelled during charging wait")
+		case <-chargeTimeout:
+			return fmt.Errorf("startCharging: timed out waiting for charging (5 min)")
+		case <-chargeTicker.C:
+			snap := oh.state.Snapshot()
+			if snap.BatteryCharging {
+				log.Printf("[Order] startCharging: robot is charging (battery=%.1f%%)", snap.BatteryPercent)
+				return nil
+			}
+		}
+	}
+}
+
 // sendDeliveryWithRetry sends a deliver_to_location command and verifies it activates.
 // If delivery doesn't start (status stays map_loaded), it re-selects delivery mode and retries.
 func (oh *OrderHandler) sendDeliveryWithRetry(stationName string) error {
@@ -611,6 +706,8 @@ func (oh *OrderHandler) executeAction(orderID string, action *VDA5050Action, can
 		// Robot has no drop mechanism — mark as finished immediately
 		log.Printf("[Order] drop: (no mechanism, skipping)")
 		err = nil
+	case "startCharging":
+		err = oh.actionStartCharging(action, cancelCh)
 	default:
 		log.Printf("[Order] Unknown action type: %s, skipping", action.ActionType)
 		err = nil
@@ -1036,6 +1133,68 @@ func (oh *OrderHandler) setPoseAtStation(stationName string) error {
 		}
 	}
 	return fmt.Errorf("station '%s' not found in POI data", stationName)
+}
+
+// ensureNotCharging checks if the robot is currently charging and, if so,
+// sends leave_charger and waits for charging to stop before returning.
+func (oh *OrderHandler) ensureNotCharging(cancelCh chan struct{}) error {
+	snap := oh.state.Snapshot()
+	if !snap.BatteryCharging {
+		return nil
+	}
+
+	log.Printf("[Order] Robot is charging, sending leave_charger before task execution")
+
+	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
+	payload, _ := json.Marshal(map[string]interface{}{
+		"delivery_command": map[string]interface{}{
+			"leave_charger": "",
+		},
+	})
+	resp, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("leave_charger request failed: %w", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("leave_charger HTTP %d: %s", resp.StatusCode, string(body))
+	}
+	log.Printf("[Order] leave_charger sent (HTTP %d)", resp.StatusCode)
+
+	// Poll BatteryCharging == false (set by webhook hide_charging)
+	timeout := time.NewTimer(60 * time.Second)
+	defer timeout.Stop()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-cancelCh:
+			return fmt.Errorf("order cancelled while leaving charger")
+		case <-timeout.C:
+			return fmt.Errorf("timeout waiting for robot to leave charger (60s)")
+		case <-ticker.C:
+			snap := oh.state.Snapshot()
+			if !snap.BatteryCharging {
+				log.Printf("[Order] Robot left charger, re-selecting delivery mode")
+				// Re-select delivery mode to ensure navigation stack is ready
+				deliveryPayload, _ := json.Marshal(map[string]string{"select_mode": "delivery"})
+				if r, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(deliveryPayload)); err != nil {
+					log.Printf("[Order] ensureNotCharging: select_mode delivery failed: %v", err)
+				} else {
+					r.Body.Close()
+				}
+				log.Printf("[Order] ensureNotCharging: waiting 5s to stabilize")
+				select {
+				case <-cancelCh:
+					return fmt.Errorf("order cancelled while stabilizing after leaving charger")
+				case <-time.After(5 * time.Second):
+					return nil
+				}
+			}
+		}
+	}
 }
 
 // --- Helpers ---
