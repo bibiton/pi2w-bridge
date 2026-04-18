@@ -3,10 +3,35 @@ package main
 import (
 	"context"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
+
+const snapshotFilePath = "/var/log/pi2w-snapshots.log"
+const snapshotFileMaxBytes = 2 * 1024 * 1024 // rotate at 2 MiB
+
+var snapshotFileMu sync.Mutex
+
+func appendSnapshotToFile(body string) {
+	snapshotFileMu.Lock()
+	defer snapshotFileMu.Unlock()
+
+	if info, err := os.Stat(snapshotFilePath); err == nil && info.Size() > snapshotFileMaxBytes {
+		_ = os.Rename(snapshotFilePath, snapshotFilePath+".1")
+	}
+	f, err := os.OpenFile(snapshotFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("[NET-SNAPSHOT] file open failed: %v", err)
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(time.Now().Format("2006-01-02T15:04:05-07:00") + " ")
+	_, _ = f.WriteString(body)
+	_, _ = f.WriteString("\n")
+}
 
 // StartNetworkSnapshotLogger periodically dumps Pi's network state.
 // Every snapshot is one big multi-line log entry tagged [NET-SNAPSHOT].
@@ -62,5 +87,7 @@ func snapshotNetwork(reason string) {
 		}
 	}
 	b.WriteString("====== /NET-SNAPSHOT ======")
-	log.Printf("[NET-SNAPSHOT] %s", b.String())
+	body := b.String()
+	log.Printf("[NET-SNAPSHOT] %s", body)
+	appendSnapshotToFile(body)
 }
