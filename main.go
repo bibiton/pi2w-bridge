@@ -76,6 +76,7 @@ func main() {
 	// - Link probe: fast hot-plug if usb0 RX is frozen for 15s
 	StartUSBWatchdog(cfg.RobotIP)
 	StartUSBLinkWatchdog(cfg.RobotIP)
+	StartNetworkSnapshotLogger()
 
 	// 12. Start status logging
 	go statusLogger(state)

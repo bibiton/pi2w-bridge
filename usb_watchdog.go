@@ -30,8 +30,10 @@ func safeReloadGEther(reason string, minInterval time.Duration) bool {
 		return false
 	}
 	log.Printf("[USB] Hot-plugging g_ether — %s", reason)
+	snapshotNetwork("pre-reload: " + reason)
 	reloadGEther()
 	lastReloadAt = time.Now()
+	snapshotNetwork("post-reload")
 	return true
 }
 
@@ -134,6 +136,7 @@ func StartUSBLinkWatchdog(robotIP string) {
 				}
 				log.Printf("[USB] WARNING: usb0 has traffic but robot %s did not reply. Foreign peer detected: %s. Check the USB cable — it may be plugged into the wrong host.",
 					robotIP, peer)
+				snapshotNetwork("wrong-peer:" + peer)
 				lastWrongPeerLogAt = time.Now()
 				continue
 			}
