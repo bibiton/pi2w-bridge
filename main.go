@@ -75,7 +75,7 @@ func main() {
 	// - TCP probe: long-term safety net (3 min unreachable → reload)
 	// - Link probe: fast hot-plug if usb0 RX is frozen for 15s
 	StartUSBWatchdog(cfg.RobotIP)
-	StartUSBLinkWatchdog()
+	StartUSBLinkWatchdog(cfg.RobotIP)
 
 	// 12. Start status logging
 	go statusLogger(state)
