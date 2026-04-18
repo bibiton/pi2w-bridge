@@ -9,9 +9,8 @@ import (
 )
 
 // StartUSBWatchdog monitors connectivity to the robot.
-// If robot is unreachable for over 1 minute, reload g_ether USB gadget
-// to re-establish Ethernet-over-USB link (simulates USB replug).
-// Debounces reloads to at most once every 2 minutes.
+// Only reloads g_ether after 3 minutes of unreachable + 5-minute debounce —
+// short flakes self-heal; aggressive reload destroys a working link.
 func StartUSBWatchdog(robotIP string) {
 	go func() {
 		time.Sleep(10 * time.Second)
@@ -30,7 +29,6 @@ func StartUSBWatchdog(robotIP string) {
 				continue
 			}
 
-			// Robot unreachable
 			now := time.Now()
 			if firstUnreachableAt.IsZero() {
 				firstUnreachableAt = now
@@ -39,19 +37,19 @@ func StartUSBWatchdog(robotIP string) {
 			}
 
 			unreachableFor := now.Sub(firstUnreachableAt)
-			if unreachableFor < 1*time.Minute {
-				continue // not yet 1 minute
+			if unreachableFor < 3*time.Minute {
+				continue
 			}
 
-			if time.Since(lastReloadAt) < 2*time.Minute {
-				continue // debounce
+			if time.Since(lastReloadAt) < 5*time.Minute {
+				continue
 			}
 
 			log.Printf("[USB] Robot %s unreachable for %.0fs, reloading g_ether...",
 				robotIP, unreachableFor.Seconds())
 			reloadGEther()
 			lastReloadAt = now
-			firstUnreachableAt = time.Time{} // reset counter
+			firstUnreachableAt = time.Time{}
 		}
 	}()
 }
@@ -74,14 +72,33 @@ func isRobotReachable(robotIP string) bool {
 	return false
 }
 
-// reloadGEther reloads the g_ether USB gadget kernel module on Pi.
+// reloadGEther reloads the g_ether USB gadget kernel module on Pi,
+// then lets NetworkManager reapply the usb0 profile (robot USB host expects
+// Pi = 192.168.2.1/24). Static fallback only if NM fails to set an IPv4.
+// Do NOT hardcode MAC: kernel derives deterministic MAC from board serial.
+// Do NOT hardcode a wrong subnet: watchdog must not fight NM's profile.
 func reloadGEther() {
-	script := `modprobe -r g_ether 2>/dev/null; sleep 1; modprobe g_ether host_addr=48:6F:73:74:50:43 dev_addr=42:61:64:55:53:42; sleep 2; ifconfig usb0 192.168.168.169 netmask 255.255.255.0 up`
+	script := `
+set +e
+modprobe -r g_ether 2>/dev/null
+sleep 1
+modprobe g_ether
+sleep 2
+if command -v nmcli >/dev/null 2>&1; then
+  nmcli device reapply usb0 2>/dev/null || nmcli connection up ifname usb0 2>/dev/null || true
+fi
+sleep 2
+if ! ip -4 addr show dev usb0 2>/dev/null | grep -q "inet "; then
+  ip link set usb0 up
+  ip addr add 192.168.2.1/24 dev usb0
+  echo "[usb-fallback] applied static 192.168.2.1/24"
+fi
+`
 	cmd := exec.Command("sudo", "bash", "-c", script)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("[USB] g_ether reload failed: %v output=%s", err, string(out))
 	} else {
-		log.Printf("[USB] g_ether reloaded successfully")
+		log.Printf("[USB] g_ether reloaded: %s", string(out))
 	}
 }

@@ -34,9 +34,9 @@ func LoadConfig() (*Config, error) {
 
 	cfg := &Config{
 		ListenAddr:     envOrDefault("LISTEN_ADDR", ":5201"),
-		RobotIP:        envOrDefault("ROBOT_IP", "192.168.168.168"),
+		RobotIP:      envOrDefault("ROBOT_IP", "192.168.2.100"),
 		RobotPort:    envOrDefault("ROBOT_PORT", "8080"),
-		RobotFastAPI: envOrDefault("ROBOT_FASTAPI_URL", "http://192.168.168.168:8000"),
+		RobotFastAPI: envOrDefault("ROBOT_FASTAPI_URL", "http://192.168.2.100:8000"),
 		MQTTBroker:     envOrDefault("MQTT_BROKER", "wss://nexmqtt.jini.tw:443/mqtt"),
 		MQTTUser:       envOrDefault("MQTT_USER", "bibi"),
 		MQTTPass:       envOrDefault("MQTT_PASS", "70595145"),
