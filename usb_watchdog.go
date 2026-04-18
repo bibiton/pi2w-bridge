@@ -4,19 +4,42 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
-// StartUSBWatchdog monitors connectivity to the robot.
-// Only reloads g_ether after 3 minutes of unreachable + 5-minute debounce —
-// short flakes self-heal; aggressive reload destroys a working link.
+// Shared reload state so multiple watchdogs don't stomp on each other.
+var (
+	reloadMu     sync.Mutex
+	lastReloadAt time.Time
+)
+
+// safeReloadGEther performs a reload but returns immediately (without
+// reloading) if one already ran within minInterval. Thread-safe.
+func safeReloadGEther(reason string, minInterval time.Duration) bool {
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
+	if !lastReloadAt.IsZero() && time.Since(lastReloadAt) < minInterval {
+		return false
+	}
+	log.Printf("[USB] Hot-plugging g_ether — %s", reason)
+	reloadGEther()
+	lastReloadAt = time.Now()
+	return true
+}
+
+// StartUSBWatchdog monitors TCP reachability to the robot.
+// Triggers reload after 3 minutes of unreachable (long-term safety net).
+// Fast packet-level recovery is handled by StartUSBLinkWatchdog.
 func StartUSBWatchdog(robotIP string) {
 	go func() {
 		time.Sleep(10 * time.Second)
 
 		var firstUnreachableAt time.Time
-		var lastReloadAt time.Time
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
@@ -36,22 +59,91 @@ func StartUSBWatchdog(robotIP string) {
 				continue
 			}
 
-			unreachableFor := now.Sub(firstUnreachableAt)
-			if unreachableFor < 3*time.Minute {
+			if now.Sub(firstUnreachableAt) < 3*time.Minute {
 				continue
 			}
 
-			if time.Since(lastReloadAt) < 5*time.Minute {
-				continue
+			if safeReloadGEther(
+				"TCP unreachable "+time.Since(firstUnreachableAt).Truncate(time.Second).String(),
+				5*time.Minute,
+			) {
+				firstUnreachableAt = time.Time{}
 			}
-
-			log.Printf("[USB] Robot %s unreachable for %.0fs, reloading g_ether...",
-				robotIP, unreachableFor.Seconds())
-			reloadGEther()
-			lastReloadAt = now
-			firstUnreachableAt = time.Time{}
 		}
 	}()
+}
+
+// StartUSBLinkWatchdog watches usb0 RX packet counter. If no new RX packets
+// arrive for rxStaleThreshold, hot-plug g_ether to force host re-enumerate.
+// This catches the "link up but host-side dead" scenario that TCP probe
+// is too slow to detect.
+func StartUSBLinkWatchdog() {
+	const (
+		pollInterval     = 3 * time.Second
+		rxStaleThreshold = 15 * time.Second
+		reloadCooldown   = 45 * time.Second
+		warmup           = 20 * time.Second
+	)
+
+	go func() {
+		time.Sleep(warmup)
+
+		var lastRX uint64
+		haveBaseline := false
+		lastActivityAt := time.Now()
+
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			rx, ok := readUSB0RXPackets()
+			if !ok {
+				// usb0 gone (mid-reload or unplugged) — reset baseline.
+				haveBaseline = false
+				lastActivityAt = time.Now()
+				continue
+			}
+
+			if !haveBaseline {
+				lastRX = rx
+				haveBaseline = true
+				lastActivityAt = time.Now()
+				continue
+			}
+
+			if rx != lastRX {
+				lastRX = rx
+				lastActivityAt = time.Now()
+				continue
+			}
+
+			stale := time.Since(lastActivityAt)
+			if stale < rxStaleThreshold {
+				continue
+			}
+
+			if safeReloadGEther(
+				"usb0 RX frozen "+stale.Truncate(time.Second).String(),
+				reloadCooldown,
+			) {
+				// Re-baseline after reload — usb0 interface was recreated.
+				haveBaseline = false
+				lastActivityAt = time.Now()
+			}
+		}
+	}()
+}
+
+func readUSB0RXPackets() (uint64, bool) {
+	data, err := os.ReadFile("/sys/class/net/usb0/statistics/rx_packets")
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // isRobotReachable checks if the robot is reachable via TCP connect to port 8080.

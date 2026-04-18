@@ -71,8 +71,11 @@ func main() {
 	elevatorSvc.Start()
 	log.Println("[Main] Elevator service started (discovery + status monitoring)")
 
-	// 11. Start USB watchdog (reload g_ether if robot unreachable for 1 min)
+	// 11. Start USB watchdogs
+	// - TCP probe: long-term safety net (3 min unreachable → reload)
+	// - Link probe: fast hot-plug if usb0 RX is frozen for 15s
 	StartUSBWatchdog(cfg.RobotIP)
+	StartUSBLinkWatchdog()
 
 	// 12. Start status logging
 	go statusLogger(state)
