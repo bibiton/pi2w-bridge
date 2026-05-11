@@ -26,6 +26,9 @@ type Config struct {
 	// VDA5050 identity
 	Manufacturer string
 	SerialNumber string
+
+	// atomros2-tts (local TTS service). Empty disables voice playback.
+	TTSURL string
 }
 
 func LoadConfig() (*Config, error) {
@@ -43,6 +46,7 @@ func LoadConfig() (*Config, error) {
 		MQTTPrefix:     envOrDefault("MQTT_PREFIX", "/uagv/v2"),
 		Manufacturer:   envOrDefault("VDA_MANUFACTURER", "atom"),
 		SerialNumber:   envOrDefault("VDA_SERIAL", "adai01"),
+		TTSURL:         envOrDefault("TTS_URL", "http://192.168.2.100:54087"),
 	}
 
 	// Override with mqtt_config.json if it exists

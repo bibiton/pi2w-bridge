@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -73,6 +74,7 @@ type OrderHandler struct {
 	robotWS      *RobotWSClient
 	elevatorCfg  *ElevatorConfig
 	client       *http.Client
+	tts          *TTSClient // nil when TTS_URL is empty — voice prompts are skipped
 
 	mu          sync.Mutex
 	currentOrder *VDA5050Order
@@ -87,6 +89,7 @@ func NewOrderHandler(cfg *Config, state *RobotState, bridge *MQTTBridge, robotWS
 		robotWS:     robotWS,
 		elevatorCfg: elevatorCfg,
 		client:      &http.Client{Timeout: 30 * time.Second},
+		tts:         NewTTSClient(cfg.TTSURL),
 	}
 }
 
@@ -115,6 +118,16 @@ func (oh *OrderHandler) HandleOrder(payload []byte) {
 	oh.currentOrder = &order
 	cancelCh := oh.cancelCh
 	oh.mu.Unlock()
+
+	// Pre-synthesize all playVoice utterances on the TTS service so that
+	// reaching a node triggers instant playback (no synth wait at node arrival).
+	// Runs in its own goroutine so we never block order acceptance even if
+	// the TTS service is slow or unreachable.
+	go func() {
+		if oh.tts != nil {
+			oh.tts.PrepareOrderVoices(&order)
+		}
+	}()
 
 	go oh.executeOrder(&order, cancelCh)
 }
@@ -701,9 +714,15 @@ func (oh *OrderHandler) executeAction(orderID string, action *VDA5050Action, can
 	case "wait":
 		err = oh.actionWait(action, cancelCh)
 	case "playVoice":
-		// Robot has no TTS hardware — mark as finished immediately
+		// Play the audio that was pre-synthesized at order accept (HandleOrder).
+		// On TTS failure we log + continue — voice is best-effort, never blocks
+		// physical task progress.
 		text := getActionParam(action, "text")
-		log.Printf("[Order] playVoice: '%s' (no TTS hardware, skipping)", text)
+		if oh.tts == nil {
+			log.Printf("[Order] playVoice: %q (TTS_URL unset, skipping)", text)
+		} else if playErr := oh.playVoiceAction(action, text, cancelCh); playErr != nil {
+			log.Printf("[Order] playVoice: %q failed: %v (continuing)", text, playErr)
+		}
 		err = nil
 	case "drop":
 		// Robot has no drop mechanism — mark as finished immediately
@@ -1201,4 +1220,49 @@ func getActionParam(action *VDA5050Action, key string) string {
 		}
 	}
 	return ""
+}
+
+// playVoiceAction triggers playback of a pre-cached utterance.
+// If /play returns 425 (still preparing), it waits briefly and retries —
+// this handles the race where the robot reaches a node faster than the
+// TTS service finishes background synthesis.
+//
+// If the cache entry is missing entirely (e.g. pi2w-bridge restarted
+// mid-order, losing the pre-prepare burst), it falls back to synth-on-demand
+// via /prepare + /play.
+func (oh *OrderHandler) playVoiceAction(action *VDA5050Action, text string, cancelCh chan struct{}) error {
+	id := action.ActionID
+
+	const maxRetries = 30 // 30 × 200ms = 6s — long enough for fanchen-C synth
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case <-cancelCh:
+			return fmt.Errorf("cancelled")
+		default:
+		}
+
+		_, err := oh.tts.Play(id)
+		if err == nil {
+			log.Printf("[Order] playVoice: %q played (id=%s)", text, id)
+			return nil
+		}
+		errStr := err.Error()
+		// 425 = still preparing → wait + retry
+		if strings.Contains(errStr, "HTTP 425") {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		// 404 = not cached → maybe pre-prepare didn't fire or we restarted.
+		// Do synth-on-demand: prepare and then loop again.
+		if strings.Contains(errStr, "HTTP 404") {
+			log.Printf("[Order] playVoice: id=%s not cached, synth-on-demand", id)
+			if perr := oh.tts.Prepare(id, text); perr != nil {
+				return fmt.Errorf("on-demand prepare: %w", perr)
+			}
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("/play retried %d times, still not ready", maxRetries)
 }
