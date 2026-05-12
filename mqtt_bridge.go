@@ -26,6 +26,9 @@ type MQTTBridge struct {
 
 	// Order handler
 	orderHandler *OrderHandler
+
+	// Optional per-session logger; if nil, log.Default() is used.
+	logger *log.Logger
 }
 
 func NewMQTTBridge(cfg *Config, state *RobotState, mapService *MapService, robotWS *RobotWSClient) *MQTTBridge {
