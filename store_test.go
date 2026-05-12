@@ -1,13 +1,20 @@
 package main
 
 import (
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
+var testStoreSeq int64
+
+// newTestStore returns a fresh in-memory SQLite store, isolated per call so
+// tests (including parallel ones) never interfere with each other.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := OpenStore("file::memory:?cache=shared")
+	dsn := fmt.Sprintf("file:teststore%d?mode=memory&cache=shared", atomic.AddInt64(&testStoreSeq, 1))
+	s, err := OpenStore(dsn)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
