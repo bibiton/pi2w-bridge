@@ -59,9 +59,6 @@ func main() {
 	// 8. Start map list update loop (every 5 minutes)
 	StartMapListLoop(mapService, state)
 
-	// 9. Start tunnel URL watcher
-	StartTunnelURLWatcher(mqttBridge)
-
 	// 10. Start MQTT publish loops
 	mqttBridge.StartPublishLoops()
 
@@ -71,14 +68,7 @@ func main() {
 	elevatorSvc.Start()
 	log.Println("[Main] Elevator service started (discovery + status monitoring)")
 
-	// 11. Start USB watchdogs
-	// - TCP probe: long-term safety net (3 min unreachable → reload)
-	// - Link probe: fast hot-plug if usb0 RX is frozen for 15s
-	StartUSBWatchdog(cfg.RobotIP)
-	StartUSBLinkWatchdog(cfg.RobotIP)
-	StartNetworkSnapshotLogger()
-
-	// 12. Start status logging
+	// 11. Start status logging
 	go statusLogger(state)
 
 	log.Println("[Main] All systems started. Waiting for signal...")

@@ -890,11 +890,9 @@ func (oh *OrderHandler) cancelOrder(orderID string) {
 //  3.   SetInitialPose at tunnel's elevator hall point
 //  3.5  Re-select delivery mode
 //  4+5. tw_elevator_call → blocks until elevator arrives at current floor (FINISHED)
-//  5.5  Connect elevator WiFi
 //  6a.  Navigate into elevator car
 //  6b.  tw_elevator_enter → blocks until elevator arrives at target floor ("please exit" RUNNING)
 //  9.   Navigate out of elevator to tunnel hall + tw_elevator_exit (FINISHED)
-//  9.5  Disconnect elevator WiFi
 //  10.  switchMap to target floor map
 //  11.  SetInitialPose at target floor's elevator hall point
 //  11.5 Re-select delivery mode
@@ -969,16 +967,6 @@ func (oh *OrderHandler) handleFloorChange(orderID, fromMapID, toMapID string, ca
 	}
 	log.Printf("[Elevator] Step 5: Elevator arrived at floor %d", fromFloor.Floor)
 
-	// Step 5.5: Connect elevator WiFi before entering
-	if len(ev.WifiNetworks) > 0 {
-		log.Printf("[Elevator] Step 5.5: Connecting elevator WiFi...")
-		if err := ConnectElevatorWifi(ev.WifiNetworks); err != nil {
-			log.Printf("[Elevator] Step 5.5: WiFi connect failed (non-fatal): %v", err)
-		} else {
-			log.Printf("[Elevator] Step 5.5: Elevator WiFi connected")
-		}
-	}
-
 	// Step 6: Enter elevator — navigate to car station first, then notify IoT Gateway
 	carStation, ok := ev.Cars["A"]
 	if !ok {
@@ -1007,15 +995,6 @@ func (oh *OrderHandler) handleFloorChange(orderID, fromMapID, toMapID string, ca
 		log.Printf("[Elevator] Step 9: exit notify failed (non-fatal): %v", err)
 	}
 
-	// Step 9.5: Disconnect elevator WiFi after exiting
-	if len(ev.WifiNetworks) > 0 {
-		log.Printf("[Elevator] Step 9.5: Disconnecting elevator WiFi...")
-		if err := DisconnectElevatorWifi(ev.WifiNetworks); err != nil {
-			log.Printf("[Elevator] Step 9.5: WiFi disconnect failed (non-fatal): %v", err)
-		} else {
-			log.Printf("[Elevator] Step 9.5: Elevator WiFi disconnected")
-		}
-	}
 
 	// Step 10: Switch to target floor map
 	log.Printf("[Elevator] Step 10: Switching to target floor map '%s'", toMapID)
