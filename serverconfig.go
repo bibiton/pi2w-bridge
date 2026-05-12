@@ -51,8 +51,8 @@ type RobotRecord struct {
 	FastAPIHTTPURL string `json:"fastapiHTTPURL" yaml:"fastapiHTTPURL"` // http://ip:8000
 	FastAPIWSURL   string `json:"fastapiWSURL" yaml:"fastapiWSURL"`     // ws://ip:8000/ws
 	WebhookSecret  string `json:"webhookSecret" yaml:"webhookSecret"`
-	Status         string `json:"status" yaml:"-"`     // online|offline|errored|provisional|deleted
-	Source         string `json:"source" yaml:"-"`     // db|yaml|provisional
+	Status         string `json:"status" yaml:"-"` // online|offline|errored|provisional|deleted
+	Source         string `json:"source" yaml:"-"` // db|yaml|provisional
 	LastSeenAt     int64  `json:"lastSeenAt" yaml:"-"`
 }
 

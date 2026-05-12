@@ -39,8 +39,8 @@ func NewRobotSession(rec RobotRecord, srv *ServerConfig, store *Store) *RobotSes
 	return s
 }
 
-func (s *RobotSession) ID() string           { return s.rec.ID }
-func (s *RobotSession) State() *RobotState   { return s.state }
+func (s *RobotSession) ID() string            { return s.rec.ID }
+func (s *RobotSession) State() *RobotState    { return s.state }
 func (s *RobotSession) WebhookSecret() string { return s.cfg.WebhookSecret }
 
 // HandleWebhook applies a robot webhook payload (single object or array) to state.

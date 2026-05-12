@@ -29,11 +29,11 @@ type VDA5050Order struct {
 }
 
 type VDA5050Node struct {
-	NodeID       string            `json:"nodeId"`
-	SequenceID   uint32            `json:"sequenceId"`
-	Released     bool              `json:"released"`
-	NodePosition *VDA5050Position  `json:"nodePosition,omitempty"`
-	Actions      []VDA5050Action   `json:"actions"`
+	NodeID       string           `json:"nodeId"`
+	SequenceID   uint32           `json:"sequenceId"`
+	Released     bool             `json:"released"`
+	NodePosition *VDA5050Position `json:"nodePosition,omitempty"`
+	Actions      []VDA5050Action  `json:"actions"`
 }
 
 type VDA5050Edge struct {
@@ -53,9 +53,9 @@ type VDA5050Position struct {
 }
 
 type VDA5050Action struct {
-	ActionID         string              `json:"actionId"`
-	ActionType       string              `json:"actionType"`
-	BlockingType     string              `json:"blockingType,omitempty"`
+	ActionID         string               `json:"actionId"`
+	ActionType       string               `json:"actionType"`
+	BlockingType     string               `json:"blockingType,omitempty"`
 	ActionParameters []VDA5050ActionParam `json:"actionParameters,omitempty"`
 }
 
@@ -67,16 +67,16 @@ type VDA5050ActionParam struct {
 // --- Order Handler ---
 
 type OrderHandler struct {
-	cfg          *Config
-	state        *RobotState
-	bridge       *MQTTBridge
-	robotWS      *RobotWSClient
-	client       *http.Client
-	tts          *TTSClient // nil when TTS_URL is empty — voice prompts are skipped
+	cfg     *Config
+	state   *RobotState
+	bridge  *MQTTBridge
+	robotWS *RobotWSClient
+	client  *http.Client
+	tts     *TTSClient // nil when TTS_URL is empty — voice prompts are skipped
 
-	mu          sync.Mutex
+	mu           sync.Mutex
 	currentOrder *VDA5050Order
-	cancelCh    chan struct{} // close to cancel current order
+	cancelCh     chan struct{} // close to cancel current order
 }
 
 func NewOrderHandler(cfg *Config, state *RobotState, bridge *MQTTBridge, robotWS *RobotWSClient) *OrderHandler {

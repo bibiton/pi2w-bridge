@@ -91,8 +91,10 @@ func (s *Store) GetRobot(id string) (RobotRecord, error) {
 	return r, err
 }
 
-func (s *Store) ListRobots() ([]RobotRecord, error)       { return s.queryRobots("") }
-func (s *Store) ListActiveRobots() ([]RobotRecord, error) { return s.queryRobots("WHERE status != 'deleted'") }
+func (s *Store) ListRobots() ([]RobotRecord, error) { return s.queryRobots("") }
+func (s *Store) ListActiveRobots() ([]RobotRecord, error) {
+	return s.queryRobots("WHERE status != 'deleted'")
+}
 
 func (s *Store) queryRobots(where string) ([]RobotRecord, error) {
 	rows, err := s.db.Query(`SELECT id,manufacturer,serial,atom_base_url,fastapi_http_url,fastapi_ws_url,webhook_secret,status,source,last_seen_at FROM robots ` + where)
