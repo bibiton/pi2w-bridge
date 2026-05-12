@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 type MQTTBridge struct {
+	clientMu   sync.RWMutex
 	client     mqtt.Client
 	cfg        *Config
 	state      *RobotState
@@ -79,8 +81,12 @@ func (mb *MQTTBridge) Connect() error {
 		mb.state.SetConnectionState("CONNECTIONBROKEN")
 	})
 
+	mb.clientMu.Lock()
 	mb.client = mqtt.NewClient(opts)
+	mb.clientMu.Unlock()
+	mb.clientMu.RLock()
 	token := mb.client.Connect()
+	mb.clientMu.RUnlock()
 	if !token.WaitTimeout(10 * time.Second) {
 		return fmt.Errorf("MQTT connect timeout")
 	}
@@ -240,10 +246,13 @@ func (mb *MQTTBridge) TriggerStatePublish() {
 }
 
 func (mb *MQTTBridge) publish(topic string, payload []byte, qos byte, retained bool) {
-	if mb.client == nil || !mb.client.IsConnected() {
+	mb.clientMu.RLock()
+	c := mb.client
+	mb.clientMu.RUnlock()
+	if c == nil || !c.IsConnected() {
 		return
 	}
-	token := mb.client.Publish(topic, qos, retained, payload)
+	token := c.Publish(topic, qos, retained, payload)
 	token.WaitTimeout(2 * time.Second)
 	if token.Error() != nil {
 		log.Printf("[MQTT] Publish error on %s: %v", topic, token.Error())
@@ -306,8 +315,11 @@ func (mb *MQTTBridge) Stop() {
 	// Publish OFFLINE connection
 	mb.publishConnection("OFFLINE")
 
-	if mb.client != nil && mb.client.IsConnected() {
-		mb.client.Disconnect(1000)
+	mb.clientMu.RLock()
+	c := mb.client
+	mb.clientMu.RUnlock()
+	if c != nil && c.IsConnected() {
+		c.Disconnect(1000)
 	}
 }
 

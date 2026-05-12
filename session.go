@@ -44,11 +44,14 @@ func (s *RobotSession) State() *RobotState   { return s.state }
 func (s *RobotSession) WebhookSecret() string { return s.cfg.WebhookSecret }
 
 // HandleWebhook applies a robot webhook payload (single object or array) to state.
-// TODO(task7): replace applyWebhookPayload stub with real implementation in httpapi.go.
 func (s *RobotSession) HandleWebhook(body []byte) {
 	applyWebhookPayload(s.state, s.cfg, body, s.log)
 	if s.store != nil {
-		_ = s.store.TouchRobot(s.rec.ID, "online", time.Now())
+		status := "online"
+		if s.rec.Source == "provisional" {
+			status = "provisional"
+		}
+		_ = s.store.TouchRobot(s.rec.ID, status, time.Now())
 	}
 }
 
@@ -65,22 +68,21 @@ func (s *RobotSession) Start() {
 		s.cfg.RobotBaseURL(), s.cfg.RobotFastAPI, s.cfg.MQTTBroker, s.cfg.TopicPrefix())
 
 	s.robotWS.Start()
-	if err := s.mqttBridge.Connect(); err != nil {
-		s.log.Printf("[Session] MQTT initial connect: %v (will retry)", err)
-	}
+	go s.safe("mqttConnect", func() {
+		if err := s.mqttBridge.Connect(); err != nil {
+			s.log.Printf("[Session] MQTT initial connect: %v (will retry)", err)
+		}
+		s.mqttBridge.StartPublishLoops()
+	})
 	go s.safe("FetchInitialMapID", func() { FetchInitialMapID(s.mapService, s.state, s.cfg) })
 	StartMapListLoop(s.mapService, s.state)
-	s.mqttBridge.StartPublishLoops()
 
-	// NOTE(task-later): RegisterWebhook expects a listen-addr string like ":5201" and builds
-	// the URL internally from a local IP + port. Passing a full URL here causes a mangled
-	// registration URL; this will be fixed when RegisterWebhook is updated to accept a full URL.
 	webhookURL := s.srv.PublicBaseURL + "/webhook/" + s.rec.ID
 	go s.safe("RegisterWebhook", func() { RegisterWebhook(s.cfg, webhookURL) })
 
 	go s.safe("statusLogger", func() { s.statusLoop() })
 
-	if s.store != nil {
+	if s.store != nil && s.rec.Source != "provisional" {
 		_ = s.store.UpsertRobot(withStatus(s.rec, "online"))
 	}
 }
@@ -135,7 +137,3 @@ func (s *RobotSession) safe(name string, fn func()) {
 }
 
 func withStatus(r RobotRecord, st string) RobotRecord { r.Status = st; return r }
-
-// applyWebhookPayload parses a raw webhook body and applies it to state.
-// TODO(task7): real implementation goes in httpapi.go; delete this stub then.
-func applyWebhookPayload(_ *RobotState, _ *Config, _ []byte, _ *log.Logger) {}

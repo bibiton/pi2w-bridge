@@ -13,23 +13,29 @@ import (
 	"time"
 )
 
-// RegisterWebhook registers this Pi's webhook URL with the robot's ATOM API.
-// It retries on failure with exponential backoff.
-// After registration, it switches the robot to delivery mode.
-func RegisterWebhook(cfg *Config, listenAddr string) {
+// RegisterWebhook registers this robot's webhook URL with the robot's ATOM API.
+// If webhookURLOrAddr already starts with "http://" or "https://", it is used verbatim.
+// Otherwise it is treated as a listen-addr (":5201", "0.0.0.0:5201") and the URL is
+// constructed from the local IP that can reach the robot.
+// It retries on failure with exponential backoff and then switches to delivery mode.
+func RegisterWebhook(cfg *Config, webhookURLOrAddr string) {
 	go func() {
 		// Wait for server to be ready
 		time.Sleep(2 * time.Second)
 
-		myIP := getLocalIP(cfg.RobotIP)
-		// Extract port from listenAddr (handles ":5201", "0.0.0.0:5201", "5201")
-		port := listenAddr
-		if idx := strings.LastIndex(port, ":"); idx >= 0 {
-			port = port[idx+1:]
+		var webhookURL string
+		if strings.HasPrefix(webhookURLOrAddr, "http://") || strings.HasPrefix(webhookURLOrAddr, "https://") {
+			webhookURL = webhookURLOrAddr
+		} else {
+			myIP := getLocalIP(cfg.RobotIP)
+			// Extract port from listenAddr (handles ":5201", "0.0.0.0:5201", "5201")
+			port := webhookURLOrAddr
+			if idx := strings.LastIndex(port, ":"); idx >= 0 {
+				port = port[idx+1:]
+			}
+			webhookURL = fmt.Sprintf("http://%s:%s/", myIP, port)
 		}
-
-		webhookURL := fmt.Sprintf("http://%s:%s/", myIP, port)
-		log.Printf("[Register] Local IP: %s, Webhook URL: %s", myIP, webhookURL)
+		log.Printf("[Register] Webhook URL: %s", webhookURL)
 
 		retryInterval := 5 * time.Second
 		maxRetry := 30 * time.Second
