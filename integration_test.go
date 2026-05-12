@@ -14,6 +14,7 @@ import (
 //     hit the robot's ATOM/FastAPI endpoint immediately on Start).
 //  2. Calling HandleWebhook updates state.LastUpdate (ApplyWebhookData always sets it).
 func TestSession_StartsAgainstFakeRobot(t *testing.T) {
+	t.Parallel()
 	var hits int32
 	fr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
