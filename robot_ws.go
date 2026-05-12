@@ -22,7 +22,8 @@ type RobotWSClient struct {
 	mu   sync.Mutex
 	conn *websocket.Conn
 
-	stopCh chan struct{}
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewRobotWSClient creates a new WebSocket client for the robot FastAPI.
@@ -53,12 +54,14 @@ func (c *RobotWSClient) Start() {
 
 // Stop closes the WebSocket connection and stops reconnecting.
 func (c *RobotWSClient) Stop() {
-	close(c.stopCh)
-	c.mu.Lock()
-	if c.conn != nil {
-		c.conn.Close()
-	}
-	c.mu.Unlock()
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+		c.mu.Lock()
+		if c.conn != nil {
+			c.conn.Close()
+		}
+		c.mu.Unlock()
+	})
 }
 
 // NavigateTo sends a navigate_to_pose command to the robot.

@@ -23,6 +23,7 @@ type MQTTBridge struct {
 	// Channels for triggering immediate publishes
 	stateRequestCh chan struct{}
 	stopCh         chan struct{}
+	stopOnce       sync.Once
 
 	// InstantAction handler
 	actionHandler *InstantActionHandler
@@ -309,17 +310,19 @@ func (mb *MQTTBridge) handleInstantActions(payload []byte) {
 }
 
 func (mb *MQTTBridge) Stop() {
-	close(mb.stopCh)
+	mb.stopOnce.Do(func() {
+		close(mb.stopCh)
 
-	// Publish OFFLINE connection
-	mb.publishConnection("OFFLINE")
+		// Publish OFFLINE connection
+		mb.publishConnection("OFFLINE")
 
-	mb.clientMu.RLock()
-	c := mb.client
-	mb.clientMu.RUnlock()
-	if c != nil && c.IsConnected() {
-		c.Disconnect(1000)
-	}
+		mb.clientMu.RLock()
+		c := mb.client
+		mb.clientMu.RUnlock()
+		if c != nil && c.IsConnected() {
+			c.Disconnect(1000)
+		}
+	})
 }
 
 // isTwAction checks if an action type is a T-Extension action (meant for IoT Gateway).

@@ -92,7 +92,8 @@ func SyncRobotsYAML(path string, mgr *SessionManager, store *Store) {
 }
 
 // WatchRobotsYAML calls SyncRobotsYAML on startup and whenever the file changes.
-func WatchRobotsYAML(path string, mgr *SessionManager, store *Store) {
+// stopCh may be closed to stop the watcher goroutine and release the fsnotify watcher.
+func WatchRobotsYAML(path string, mgr *SessionManager, store *Store, stopCh <-chan struct{}) {
 	SyncRobotsYAML(path, mgr, store)
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -119,6 +120,9 @@ func WatchRobotsYAML(path string, mgr *SessionManager, store *Store) {
 		}
 		for {
 			select {
+			case <-stopCh:
+				w.Close()
+				return
 			case ev, ok := <-w.Events:
 				if !ok {
 					return

@@ -14,7 +14,7 @@ import (
 
 func main() {
 	if len(os.Args) < 4 {
-		fmt.Fprintf(os.Stderr, "Usage: setpose <x> <y> <angle_degrees>\n")
+		fmt.Fprintf(os.Stderr, "Usage: setpose <x> <y> <angle_degrees>  (ROBOT_WS_HOST defaults to 192.168.2.100:8000)\n")
 		os.Exit(1)
 	}
 	x, _ := strconv.ParseFloat(os.Args[1], 64)
@@ -27,7 +27,11 @@ func main() {
 	}
 	yaw := angleDeg * math.Pi / 180.0
 
-	u := url.URL{Scheme: "ws", Host: "192.168.2.100:8000", Path: "/ws"}
+	host := os.Getenv("ROBOT_WS_HOST")
+	if host == "" {
+		host = "192.168.2.100:8000"
+	}
+	u := url.URL{Scheme: "ws", Host: host, Path: "/ws"}
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		log.Fatalf("dial: %v", err)

@@ -28,8 +28,9 @@ func main() {
 	mgr := NewSessionManager(srv, store)
 	mgr.LoadFromStore()
 
+	appStop := make(chan struct{})
 	robotsYAMLPath := envOrDefault("ROBOTS_YAML", "robots.yaml")
-	WatchRobotsYAML(robotsYAMLPath, mgr, store)
+	WatchRobotsYAML(robotsYAMLPath, mgr, store, appStop)
 
 	api := NewAPIServer(srv, mgr, store)
 	if err := api.Start(); err != nil {
@@ -42,6 +43,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	log.Println("[Main] shutting down...")
+	close(appStop)
 	api.Stop()
 	mgr.StopAll()
 	log.Println("[Main] bye")
