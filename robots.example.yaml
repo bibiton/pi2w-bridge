@@ -1,0 +1,11 @@
+# Copy to robots.yaml (gitignored). Hot-reloaded — edit and save to apply.
+robots:
+  - id: adai01
+    manufacturer: atom
+    serial: adai01
+    atomBaseURL: http://1.2.3.4:8080
+    fastapiHTTPURL: http://1.2.3.4:8000
+    fastapiWSURL: ws://1.2.3.4:8000/ws
+    webhookSecret: change-me-per-robot
+  # - id: adai02
+  #   atomBaseURL: http://1.2.3.5:8080   # fastapi/serial/secret will be defaulted
