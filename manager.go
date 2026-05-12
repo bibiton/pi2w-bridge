@@ -31,19 +31,20 @@ func (m *SessionManager) Register(rec RobotRecord) error {
 		return errEmptyRobotID
 	}
 	m.mu.Lock()
-	if old, ok := m.sessions[rec.ID]; ok {
-		delete(m.sessions, rec.ID)
-		m.mu.Unlock()
-		old.Stop()
-		m.mu.Lock()
-	}
+	old := m.sessions[rec.ID]
 	sess := NewRobotSession(rec, m.srv, m.store)
 	m.sessions[rec.ID] = sess
 	m.mu.Unlock()
+
+	// Stop the replaced session before starting the new one so we never have
+	// two live MQTT clients fighting the same VDA5050 connection topic.
+	if old != nil {
+		old.Stop()
+	}
+	sess.Start()
 	if m.store != nil {
 		_ = m.store.UpsertRobot(rec)
 	}
-	sess.Start()
 	log.Printf("[Manager] registered robot %s (source=%s)", rec.ID, rec.Source)
 	return nil
 }

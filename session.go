@@ -78,7 +78,7 @@ func (s *RobotSession) Start() {
 	StartMapListLoop(s.mapService, s.state)
 
 	webhookURL := s.srv.PublicBaseURL + "/webhook/" + s.rec.ID
-	go s.safe("RegisterWebhook", func() { RegisterWebhook(s.cfg, webhookURL) })
+	go s.safe("RegisterWebhook", func() { RegisterWebhook(s.cfg, webhookURL, s.stopCh) })
 
 	go s.safe("statusLogger", func() { s.statusLoop() })
 
