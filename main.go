@@ -2,25 +2,47 @@ package main
 
 import (
 	"log"
-	"time"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Fatal("main not wired yet — see Phase 7 of the plan")
-}
+	log.Println("=== Pi2W Cloud Multi-Robot Bridge ===")
 
-func statusLogger(state *RobotState) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		snap := state.Snapshot()
-		if snap.LastUpdate.IsZero() {
-			log.Println("[Status] No data from robot yet")
-		} else {
-			log.Printf("[Status] %s (last update: %v ago)",
-				FormatStateLog(snap),
-				time.Since(snap.LastUpdate).Round(time.Second))
-		}
+	srv := LoadServerConfig()
+	log.Printf("[Config] listen=%s public=%s db=%s mqtt=%s prefix=%s",
+		srv.ListenAddr, srv.PublicBaseURL, srv.DBPath, srv.MQTTBroker, srv.MQTTPrefix)
+
+	store, err := OpenStore(srv.DBPath)
+	if err != nil {
+		log.Fatalf("open store: %v", err)
 	}
+	defer store.Close()
+
+	if n, err := store.FailRunningOrders("bridge_restarted"); err == nil && n > 0 {
+		log.Printf("[Main] marked %d in-flight order(s) failed (bridge_restarted)", n)
+	}
+
+	mgr := NewSessionManager(srv, store)
+	mgr.LoadFromStore()
+
+	robotsYAMLPath := envOrDefault("ROBOTS_YAML", "robots.yaml")
+	WatchRobotsYAML(robotsYAMLPath, mgr, store)
+
+	api := NewAPIServer(srv, mgr, store)
+	if err := api.Start(); err != nil {
+		log.Fatalf("api start: %v", err)
+	}
+
+	log.Println("[Main] up. Managing", len(mgr.List()), "robot session(s).")
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Println("[Main] shutting down...")
+	api.Stop()
+	mgr.StopAll()
+	log.Println("[Main] bye")
 }
