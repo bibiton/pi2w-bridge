@@ -31,6 +31,33 @@ robots:
 	}
 }
 
+func TestRobotRecordChanged(t *testing.T) {
+	base := RobotRecord{
+		ID: "r1", Manufacturer: "m", Serial: "s",
+		AtomBaseURL: "http://1.1.1.1:8080", FastAPIHTTPURL: "http://1.1.1.1:8000",
+		FastAPIWSURL: "ws://1.1.1.1:8000/ws", WebhookSecret: "secret",
+	}
+	// Identical except ignored fields → no change.
+	other := base
+	other.Status = "errored"
+	other.Source = "yaml"
+	other.LastSeenAt = 12345
+	if robotRecordChanged(base, other) {
+		t.Errorf("expected no change when only Status/Source/LastSeenAt differ")
+	}
+	// Connection-relevant field changed → change.
+	other = base
+	other.AtomBaseURL = "http://2.2.2.2:8080"
+	if !robotRecordChanged(base, other) {
+		t.Errorf("expected change when AtomBaseURL differs")
+	}
+	other = base
+	other.WebhookSecret = "new"
+	if !robotRecordChanged(base, other) {
+		t.Errorf("expected change when WebhookSecret differs")
+	}
+}
+
 func TestLoadRobotsYAML_Missing(t *testing.T) {
 	recs, err := LoadRobotsYAML("/nonexistent/robots.yaml")
 	if err != nil || len(recs) != 0 {

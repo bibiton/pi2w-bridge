@@ -4,6 +4,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
@@ -11,6 +13,24 @@ import (
 
 type robotsFile struct {
 	Robots []RobotRecord `yaml:"robots"`
+}
+
+// lastYAMLRecords caches the last-applied yaml records (keyed by ID) so we only
+// re-Register robots whose connection-relevant fields actually changed.
+var (
+	lastYAMLMu      sync.Mutex
+	lastYAMLRecords = map[string]RobotRecord{}
+)
+
+// robotRecordChanged reports whether the connection-relevant fields of a differ
+// from b. Status/Source/LastSeenAt are intentionally ignored.
+func robotRecordChanged(a, b RobotRecord) bool {
+	return a.Manufacturer != b.Manufacturer ||
+		a.Serial != b.Serial ||
+		a.AtomBaseURL != b.AtomBaseURL ||
+		a.FastAPIHTTPURL != b.FastAPIHTTPURL ||
+		a.FastAPIWSURL != b.FastAPIWSURL ||
+		a.WebhookSecret != b.WebhookSecret
 }
 
 // LoadRobotsYAML returns the robots declared in path. A missing file is not an error.
@@ -43,12 +63,24 @@ func SyncRobotsYAML(path string, mgr *SessionManager, store *Store) {
 		return
 	}
 	want := map[string]bool{}
+	lastYAMLMu.Lock()
 	for _, r := range recs {
 		want[r.ID] = true
-		if err := mgr.Register(r); err != nil {
-			log.Printf("[robots.yaml] register %s: %v", r.ID, err)
+		prev, seen := lastYAMLRecords[r.ID]
+		if !seen || robotRecordChanged(r, prev) {
+			if err := mgr.Register(r); err != nil {
+				log.Printf("[robots.yaml] register %s: %v", r.ID, err)
+			}
 		}
 	}
+	// Replace the cache with exactly what's in the file now.
+	next := make(map[string]RobotRecord, len(recs))
+	for _, r := range recs {
+		next[r.ID] = r
+	}
+	lastYAMLRecords = next
+	lastYAMLMu.Unlock()
+
 	if store != nil {
 		known, _ := store.ListActiveRobots()
 		for _, k := range known {
@@ -78,6 +110,13 @@ func WatchRobotsYAML(path string, mgr *SessionManager, store *Store) {
 	}
 	base := filepath.Base(path)
 	go func() {
+		// Debounce: editors emit 2-3 fsnotify events per save. Coalesce a burst
+		// into a single resync ~500ms after the last relevant event.
+		const debounce = 500 * time.Millisecond
+		timer := time.NewTimer(debounce)
+		if !timer.Stop() {
+			<-timer.C
+		}
 		for {
 			select {
 			case ev, ok := <-w.Events:
@@ -85,9 +124,18 @@ func WatchRobotsYAML(path string, mgr *SessionManager, store *Store) {
 					return
 				}
 				if filepath.Base(ev.Name) == base {
-					log.Printf("[robots.yaml] change detected (%s), resyncing", ev.Op)
-					SyncRobotsYAML(path, mgr, store)
+					log.Printf("[robots.yaml] change detected (%s), debouncing", ev.Op)
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					timer.Reset(debounce)
 				}
+			case <-timer.C:
+				log.Printf("[robots.yaml] resyncing after debounce")
+				SyncRobotsYAML(path, mgr, store)
 			case err, ok := <-w.Errors:
 				if !ok {
 					return
