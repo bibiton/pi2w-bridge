@@ -2,75 +2,12 @@ package main
 
 import (
 	"log"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 )
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
-	log.Println("=== Pi 2W VDA5050 Bridge ===")
-
-	// 1. Load config
-	cfg, err := LoadConfig()
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
-	log.Printf("[Config] Robot: %s:%s, MQTT: %s, Identity: %s/%s",
-		cfg.RobotIP, cfg.RobotPort, cfg.MQTTBroker, cfg.Manufacturer, cfg.SerialNumber)
-	log.Printf("[Config] Topic prefix: %s", cfg.TopicPrefix())
-
-	// 2. Create robot state
-	state := NewRobotState()
-
-	// 4. Create map service (uses robot FastAPI :8000 + ATOM API :8080)
-	mapService := NewMapService(cfg)
-
-	// 4. Connect WebSocket to robot FastAPI (port 8000)
-	robotWS := NewRobotWSClient(cfg, state)
-	robotWS.Start()
-
-	// 5. Create and connect MQTT bridge
-	mqttBridge := NewMQTTBridge(cfg, state, mapService, robotWS)
-	if err := mqttBridge.Connect(); err != nil {
-		log.Printf("[MQTT] Initial connect: %v (will keep retrying)", err)
-	}
-
-	// 6. Start webhook server
-	webhookServer := NewWebhookServer(cfg.ListenAddr, state, cfg)
-	if err := webhookServer.Start(); err != nil {
-		log.Fatalf("Webhook server failed: %v", err)
-	}
-	log.Printf("[Webhook] Listening on %s", cfg.ListenAddr)
-
-	// 6. Register webhook with robot
-	RegisterWebhook(cfg, cfg.ListenAddr)
-
-	// 7. Fetch initial map ID from ATOM API
-	go FetchInitialMapID(mapService, state, cfg)
-
-	// 8. Start map list update loop (every 5 minutes)
-	StartMapListLoop(mapService, state)
-
-	// 10. Start MQTT publish loops
-	mqttBridge.StartPublishLoops()
-
-	// 11. Start status logging
-	go statusLogger(state)
-
-	log.Println("[Main] All systems started. Waiting for signal...")
-
-	// Wait for termination signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	log.Println("[Main] Shutting down...")
-	robotWS.Stop()
-	webhookServer.Stop()
-	mqttBridge.Stop()
-	log.Println("[Main] Goodbye!")
+	log.Fatal("main not wired yet — see Phase 7 of the plan")
 }
 
 func statusLogger(state *RobotState) {

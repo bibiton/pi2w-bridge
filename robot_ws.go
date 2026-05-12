@@ -27,12 +27,17 @@ type RobotWSClient struct {
 
 // NewRobotWSClient creates a new WebSocket client for the robot FastAPI.
 func NewRobotWSClient(cfg *Config, state *RobotState) *RobotWSClient {
-	// Build ws:// URL from RobotFastAPI (which is http://...)
-	u, err := url.Parse(cfg.RobotFastAPI)
-	if err != nil {
-		u = &url.URL{Host: cfg.RobotIP + ":8000"}
+	// Prefer the explicit WS URL; fall back to deriving from RobotFastAPI.
+	var wsURL string
+	if cfg.RobotFastAPIWS != "" {
+		wsURL = cfg.RobotFastAPIWS
+	} else {
+		u, err := url.Parse(cfg.RobotFastAPI)
+		if err != nil {
+			u = &url.URL{Host: cfg.RobotIP + ":8000"}
+		}
+		wsURL = fmt.Sprintf("ws://%s/ws", u.Host)
 	}
-	wsURL := fmt.Sprintf("ws://%s/ws", u.Host)
 
 	return &RobotWSClient{
 		url:    wsURL,
