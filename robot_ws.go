@@ -23,9 +23,6 @@ type RobotWSClient struct {
 	conn *websocket.Conn
 
 	stopCh chan struct{}
-
-	// Optional per-session logger; if nil, log.Default() is used.
-	logger *log.Logger
 }
 
 // NewRobotWSClient creates a new WebSocket client for the robot FastAPI.

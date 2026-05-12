@@ -18,6 +18,7 @@ type MQTTBridge struct {
 	state      *RobotState
 	mapService *MapService
 	robotWS    *RobotWSClient
+	store      *Store // may be nil (unit tests)
 
 	// Channels for triggering immediate publishes
 	stateRequestCh chan struct{}
@@ -28,17 +29,15 @@ type MQTTBridge struct {
 
 	// Order handler
 	orderHandler *OrderHandler
-
-	// Optional per-session logger; if nil, log.Default() is used.
-	logger *log.Logger
 }
 
-func NewMQTTBridge(cfg *Config, state *RobotState, mapService *MapService, robotWS *RobotWSClient) *MQTTBridge {
+func NewMQTTBridge(cfg *Config, state *RobotState, mapService *MapService, robotWS *RobotWSClient, store *Store) *MQTTBridge {
 	return &MQTTBridge{
 		cfg:            cfg,
 		state:          state,
 		mapService:     mapService,
 		robotWS:        robotWS,
+		store:          store,
 		stateRequestCh: make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
 	}
@@ -48,7 +47,7 @@ func (mb *MQTTBridge) Connect() error {
 	// Initialize handlers before connecting so onConnect subscriptions
 	// can handle messages immediately
 	mb.actionHandler = NewInstantActionHandler(mb.cfg, mb.state, mb.mapService, mb, mb.robotWS)
-	mb.orderHandler = NewOrderHandler(mb.cfg, mb.state, mb, mb.robotWS)
+	mb.orderHandler = NewOrderHandler(mb.cfg, mb.state, mb, mb.robotWS, mb.store)
 
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(mb.cfg.MQTTBroker)

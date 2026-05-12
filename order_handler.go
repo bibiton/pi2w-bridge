@@ -71,22 +71,69 @@ type OrderHandler struct {
 	state   *RobotState
 	bridge  *MQTTBridge
 	robotWS *RobotWSClient
+	store   *Store // may be nil (unit tests) — all store calls are nil-guarded
 	client  *http.Client
 	tts     *TTSClient // nil when TTS_URL is empty — voice prompts are skipped
 
 	mu           sync.Mutex
 	currentOrder *VDA5050Order
+	rawOrder     []byte        // raw JSON of currentOrder, for persistence
 	cancelCh     chan struct{} // close to cancel current order
 }
 
-func NewOrderHandler(cfg *Config, state *RobotState, bridge *MQTTBridge, robotWS *RobotWSClient) *OrderHandler {
+func NewOrderHandler(cfg *Config, state *RobotState, bridge *MQTTBridge, robotWS *RobotWSClient, store *Store) *OrderHandler {
 	return &OrderHandler{
 		cfg:     cfg,
 		state:   state,
 		bridge:  bridge,
 		robotWS: robotWS,
+		store:   store,
 		client:  &http.Client{Timeout: 30 * time.Second},
 		tts:     NewTTSClient(cfg.TTSURL),
+	}
+}
+
+// robotID returns the identifier to store as orders.robot_id.
+func (oh *OrderHandler) robotID() string { return oh.cfg.SerialNumber }
+
+// --- nil-safe store helpers (DB errors are logged, never fail the order) ---
+
+func (oh *OrderHandler) storeInsertOrder(order *VDA5050Order) {
+	if oh.store == nil {
+		return
+	}
+	oh.mu.Lock()
+	raw := oh.rawOrder
+	oh.mu.Unlock()
+	if err := oh.store.InsertOrder(order.OrderID, oh.robotID(), int(order.OrderUpdateID), raw); err != nil {
+		log.Printf("[Order] store InsertOrder: %v", err)
+	}
+}
+
+func (oh *OrderHandler) storeOrderNode(orderID, nodeID string) {
+	if oh.store == nil {
+		return
+	}
+	if err := oh.store.UpdateOrderNode(orderID, nodeID); err != nil {
+		log.Printf("[Order] store UpdateOrderNode: %v", err)
+	}
+}
+
+func (oh *OrderHandler) storeFinishOrder(orderID, status, errRef string) {
+	if oh.store == nil {
+		return
+	}
+	if err := oh.store.FinishOrder(orderID, status, errRef); err != nil {
+		log.Printf("[Order] store FinishOrder: %v", err)
+	}
+}
+
+func (oh *OrderHandler) storeActionState(orderID, actionID, actionType, status, resultDesc string) {
+	if oh.store == nil || orderID == "" {
+		return
+	}
+	if err := oh.store.UpsertActionState(orderID, actionID, actionType, status, resultDesc); err != nil {
+		log.Printf("[Order] store UpsertActionState: %v", err)
 	}
 }
 
@@ -113,6 +160,7 @@ func (oh *OrderHandler) HandleOrder(payload []byte) {
 	}
 	oh.cancelCh = make(chan struct{})
 	oh.currentOrder = &order
+	oh.rawOrder = append([]byte(nil), payload...)
 	cancelCh := oh.cancelCh
 	oh.mu.Unlock()
 
@@ -145,6 +193,9 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 
 	// Set order in state
 	oh.state.SetOrder(order.OrderID, order.OrderUpdateID)
+
+	// Persist the order as running.
+	oh.storeInsertOrder(order)
 
 	// Build initial nodeStates and edgeStates (all pending)
 	oh.initOrderStates(order)
@@ -180,6 +231,7 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 	originNode := nodes[0]
 	log.Printf("[Order] Origin node: %s (seq=%d)", originNode.NodeID, originNode.SequenceID)
 	oh.state.SetLastNode(originNode.NodeID, originNode.SequenceID)
+	oh.storeOrderNode(order.OrderID, originNode.NodeID)
 	oh.removeNodeState(originNode.NodeID)
 
 	// Execute origin node actions
@@ -261,6 +313,7 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 		// --- Arrived at node ---
 		log.Printf("[Order] Arrived at node %s (seq=%d)", node.NodeID, node.SequenceID)
 		oh.state.SetLastNode(node.NodeID, node.SequenceID)
+		oh.storeOrderNode(order.OrderID, node.NodeID)
 		oh.state.SetDriving(false)
 		oh.removeNodeState(node.NodeID)
 		oh.bridge.TriggerStatePublish()
@@ -357,12 +410,14 @@ func (oh *OrderHandler) navigateByStation(orderID string, action *VDA5050Action,
 
 	// Mark action as RUNNING
 	oh.state.UpdateActionState(action.ActionID, "RUNNING", "")
+	oh.storeActionState(orderID, action.ActionID, action.ActionType, "RUNNING", "")
 	oh.bridge.TriggerStatePublish()
 
 	log.Printf("[Order] GoToLocation: navigating to station '%s' via ATOM API", target)
 
 	if err := oh.sendDeliveryWithRetry(target); err != nil {
 		oh.state.UpdateActionState(action.ActionID, "FAILED", err.Error())
+		oh.storeActionState(orderID, action.ActionID, action.ActionType, "FAILED", err.Error())
 		return err
 	}
 
@@ -371,10 +426,12 @@ func (oh *OrderHandler) navigateByStation(orderID string, action *VDA5050Action,
 	// Wait for navigation completion (via webhook route_status → arrived/standby)
 	if err := oh.waitForNavigation(cancelCh); err != nil {
 		oh.state.UpdateActionState(action.ActionID, "FAILED", err.Error())
+		oh.storeActionState(orderID, action.ActionID, action.ActionType, "FAILED", err.Error())
 		return err
 	}
 
 	oh.state.UpdateActionState(action.ActionID, "FINISHED", "")
+	oh.storeActionState(orderID, action.ActionID, action.ActionType, "FINISHED", "")
 	log.Printf("[Order] GoToLocation: arrived at '%s'", target)
 
 	// Send stop to prevent ATOM auto-return after delivery completion
@@ -681,6 +738,7 @@ func (oh *OrderHandler) executeAction(orderID string, action *VDA5050Action, can
 	log.Printf("[Order] Executing action: %s (type=%s, id=%s)", action.ActionID, action.ActionType, action.ActionID)
 
 	oh.state.UpdateActionState(action.ActionID, "RUNNING", "")
+	oh.storeActionState(orderID, action.ActionID, action.ActionType, "RUNNING", "")
 	oh.bridge.TriggerStatePublish()
 
 	var err error
@@ -711,10 +769,12 @@ func (oh *OrderHandler) executeAction(orderID string, action *VDA5050Action, can
 
 	if err != nil {
 		oh.state.UpdateActionState(action.ActionID, "FAILED", err.Error())
+		oh.storeActionState(orderID, action.ActionID, action.ActionType, "FAILED", err.Error())
 		return err
 	}
 
 	oh.state.UpdateActionState(action.ActionID, "FINISHED", "")
+	oh.storeActionState(orderID, action.ActionID, action.ActionType, "FINISHED", "")
 	oh.bridge.TriggerStatePublish()
 	return nil
 }
@@ -778,6 +838,7 @@ func (oh *OrderHandler) initActionStates(order *VDA5050Order) {
 				ActionType:   action.ActionType,
 				ActionStatus: "WAITING",
 			})
+			oh.storeActionState(order.OrderID, action.ActionID, action.ActionType, "WAITING", "")
 		}
 	}
 	for _, edge := range order.Edges {
@@ -787,6 +848,7 @@ func (oh *OrderHandler) initActionStates(order *VDA5050Order) {
 				ActionType:   action.ActionType,
 				ActionStatus: "WAITING",
 			})
+			oh.storeActionState(order.OrderID, action.ActionID, action.ActionType, "WAITING", "")
 		}
 	}
 }
@@ -817,6 +879,7 @@ func (oh *OrderHandler) removeEdgeState(edgeID string) {
 
 func (oh *OrderHandler) finishOrder(orderID string) {
 	log.Printf("[Order] Order %s finished, clearing state", orderID)
+	oh.storeFinishOrder(orderID, "finished", "")
 	// Keep orderId in state so platform can see it with all actions FINISHED,
 	// then clear after a delay
 	oh.bridge.TriggerStatePublish()
@@ -832,6 +895,7 @@ func (oh *OrderHandler) finishOrder(orderID string) {
 
 func (oh *OrderHandler) failOrder(orderID string, reason string) {
 	log.Printf("[Order] Order %s FAILED: %s", orderID, reason)
+	oh.storeFinishOrder(orderID, "failed", reason)
 	oh.bridge.TriggerStatePublish()
 
 	time.Sleep(3 * time.Second)
@@ -845,6 +909,7 @@ func (oh *OrderHandler) failOrder(orderID string, reason string) {
 
 func (oh *OrderHandler) cancelOrder(orderID string) {
 	log.Printf("[Order] Order %s cancelled, clearing state", orderID)
+	oh.storeFinishOrder(orderID, "cancelled", "")
 	oh.cancelRobotNav()
 	oh.state.ClearOrder()
 	oh.bridge.TriggerStatePublish()

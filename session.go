@@ -33,9 +33,7 @@ func NewRobotSession(rec RobotRecord, srv *ServerConfig, store *Store) *RobotSes
 	s.state = NewRobotState()
 	s.mapService = NewMapService(cfg)
 	s.robotWS = NewRobotWSClient(cfg, s.state)
-	s.mqttBridge = NewMQTTBridge(cfg, s.state, s.mapService, s.robotWS)
-	s.mqttBridge.logger = lg
-	s.robotWS.logger = lg
+	s.mqttBridge = NewMQTTBridge(cfg, s.state, s.mapService, s.robotWS, store)
 	return s
 }
 
