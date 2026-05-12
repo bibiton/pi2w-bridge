@@ -30,7 +30,7 @@ func NewAPIServer(srv *ServerConfig, mgr *SessionManager, store *Store) *APIServ
 }
 
 func (a *APIServer) Start() error {
-	a.server = &http.Server{Addr: a.srv.ListenAddr, Handler: a.mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	a.server = &http.Server{Addr: a.srv.ListenAddr, Handler: a.mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[API] server error: %v", err)
@@ -57,7 +57,11 @@ func (a *APIServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	var robots []rstat
 	for _, s := range a.mgr.List() {
 		snap := s.State().Snapshot()
-		robots = append(robots, rstat{ID: s.ID(), LastSeen: snap.LastUpdate.Format(time.RFC3339), DataFresh: time.Since(snap.LastUpdate) < 15*time.Second})
+		lastSeen := ""
+		if !snap.LastUpdate.IsZero() {
+			lastSeen = snap.LastUpdate.Format(time.RFC3339)
+		}
+		robots = append(robots, rstat{ID: s.ID(), LastSeen: lastSeen, DataFresh: !snap.LastUpdate.IsZero() && time.Since(snap.LastUpdate) < 15*time.Second})
 	}
 	writeJSON(w, 200, map[string]any{"status": "ok", "robots": robots})
 }
@@ -185,6 +189,10 @@ func (a *APIServer) handleAdminRobot(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		if a.store == nil {
+			http.Error(w, "no store", http.StatusServiceUnavailable)
+			return
+		}
 		rec, err := a.store.GetRobot(id)
 		if err != nil {
 			http.Error(w, "not found", 404)
@@ -230,18 +238,22 @@ func applyWebhookPayload(state *RobotState, cfg *Config, body []byte, lg *log.Lo
 		}
 		items = []map[string]interface{}{single}
 	}
+	mapLoadedSeen := false
 	for _, item := range items {
 		ApplyWebhookData(state, item)
 		if cfg != nil {
 			if rs, ok := item["route_status"].(map[string]interface{}); ok {
 				if s, _ := rs["status"].(string); s == "map_loaded" {
-					go func() {
-						if name := queryATOMCurrentMap(cfg); name != "" {
-							state.SetMapID(name)
-						}
-					}()
+					mapLoadedSeen = true
 				}
 			}
 		}
+	}
+	if mapLoadedSeen && cfg != nil {
+		go func() {
+			if name := queryATOMCurrentMap(cfg); name != "" {
+				state.SetMapID(name)
+			}
+		}()
 	}
 }
