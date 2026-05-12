@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -15,7 +16,6 @@ type MQTTBridge struct {
 	state      *RobotState
 	mapService *MapService
 	robotWS    *RobotWSClient
-	elevatorCfg *ElevatorConfig
 
 	// Channels for triggering immediate publishes
 	stateRequestCh chan struct{}
@@ -26,18 +26,14 @@ type MQTTBridge struct {
 
 	// Order handler
 	orderHandler *OrderHandler
-
-	// Elevator service (discovery + status + call/enter/exit)
-	elevatorService *ElevatorService
 }
 
-func NewMQTTBridge(cfg *Config, state *RobotState, mapService *MapService, robotWS *RobotWSClient, elevatorCfg *ElevatorConfig) *MQTTBridge {
+func NewMQTTBridge(cfg *Config, state *RobotState, mapService *MapService, robotWS *RobotWSClient) *MQTTBridge {
 	return &MQTTBridge{
 		cfg:            cfg,
 		state:          state,
 		mapService:     mapService,
 		robotWS:        robotWS,
-		elevatorCfg:    elevatorCfg,
 		stateRequestCh: make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
 	}
@@ -47,7 +43,7 @@ func (mb *MQTTBridge) Connect() error {
 	// Initialize handlers before connecting so onConnect subscriptions
 	// can handle messages immediately
 	mb.actionHandler = NewInstantActionHandler(mb.cfg, mb.state, mb.mapService, mb, mb.robotWS)
-	mb.orderHandler = NewOrderHandler(mb.cfg, mb.state, mb, mb.robotWS, mb.elevatorCfg)
+	mb.orderHandler = NewOrderHandler(mb.cfg, mb.state, mb, mb.robotWS)
 
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(mb.cfg.MQTTBroker)
@@ -259,17 +255,6 @@ func (mb *MQTTBridge) handleInstantActions(payload []byte) {
 		return
 	}
 
-	// --- Handle actionStates (responses from IoT Gateway) ---
-	if rawStates, ok := raw["actionStates"]; ok {
-		var states []ActionStateMsg
-		if err := json.Unmarshal(rawStates, &states); err == nil && len(states) > 0 {
-			if mb.elevatorService != nil {
-				mb.elevatorService.HandleActionStates(states)
-			}
-			return // actionStates messages are responses, not actions to execute
-		}
-	}
-
 	// --- Handle instantActions / actions (commands from platform) ---
 	type actionEntry struct {
 		ActionID         string                   `json:"actionId"`
@@ -321,4 +306,9 @@ func (mb *MQTTBridge) Stop() {
 	if mb.client != nil && mb.client.IsConnected() {
 		mb.client.Disconnect(1000)
 	}
+}
+
+// isTwAction checks if an action type is a T-Extension action (meant for IoT Gateway).
+func isTwAction(actionType string) bool {
+	return strings.HasPrefix(actionType, "tw_")
 }

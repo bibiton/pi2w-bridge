@@ -24,12 +24,6 @@ func main() {
 	// 2. Create robot state
 	state := NewRobotState()
 
-	// 3. Load elevator config (optional — for multi-floor navigation)
-	elevatorCfg, err := LoadElevatorConfig("elevator_config.json")
-	if err != nil {
-		log.Fatalf("Failed to load elevator config: %v", err)
-	}
-
 	// 4. Create map service (uses robot FastAPI :8000 + ATOM API :8080)
 	mapService := NewMapService(cfg)
 
@@ -38,7 +32,7 @@ func main() {
 	robotWS.Start()
 
 	// 5. Create and connect MQTT bridge
-	mqttBridge := NewMQTTBridge(cfg, state, mapService, robotWS, elevatorCfg)
+	mqttBridge := NewMQTTBridge(cfg, state, mapService, robotWS)
 	if err := mqttBridge.Connect(); err != nil {
 		log.Printf("[MQTT] Initial connect: %v (will keep retrying)", err)
 	}
@@ -62,12 +56,6 @@ func main() {
 	// 10. Start MQTT publish loops
 	mqttBridge.StartPublishLoops()
 
-	// 10b. Start elevator service (discovery + status monitoring via IoT Gateway)
-	elevatorSvc := NewElevatorService(mqttBridge, cfg)
-	mqttBridge.elevatorService = elevatorSvc
-	elevatorSvc.Start()
-	log.Println("[Main] Elevator service started (discovery + status monitoring)")
-
 	// 11. Start status logging
 	go statusLogger(state)
 
@@ -79,7 +67,6 @@ func main() {
 	<-sigCh
 
 	log.Println("[Main] Shutting down...")
-	elevatorSvc.Stop()
 	robotWS.Stop()
 	webhookServer.Stop()
 	mqttBridge.Stop()

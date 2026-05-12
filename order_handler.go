@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -72,7 +71,6 @@ type OrderHandler struct {
 	state        *RobotState
 	bridge       *MQTTBridge
 	robotWS      *RobotWSClient
-	elevatorCfg  *ElevatorConfig
 	client       *http.Client
 	tts          *TTSClient // nil when TTS_URL is empty — voice prompts are skipped
 
@@ -81,15 +79,14 @@ type OrderHandler struct {
 	cancelCh    chan struct{} // close to cancel current order
 }
 
-func NewOrderHandler(cfg *Config, state *RobotState, bridge *MQTTBridge, robotWS *RobotWSClient, elevatorCfg *ElevatorConfig) *OrderHandler {
+func NewOrderHandler(cfg *Config, state *RobotState, bridge *MQTTBridge, robotWS *RobotWSClient) *OrderHandler {
 	return &OrderHandler{
-		cfg:         cfg,
-		state:       state,
-		bridge:      bridge,
-		robotWS:     robotWS,
-		elevatorCfg: elevatorCfg,
-		client:      &http.Client{Timeout: 30 * time.Second},
-		tts:         NewTTSClient(cfg.TTSURL),
+		cfg:     cfg,
+		state:   state,
+		bridge:  bridge,
+		robotWS: robotWS,
+		client:  &http.Client{Timeout: 30 * time.Second},
+		tts:     NewTTSClient(cfg.TTSURL),
 	}
 }
 
@@ -194,7 +191,7 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 
 	oh.bridge.TriggerStatePublish()
 
-	// Track current mapId for floor-change detection
+	// Track current mapId for cross-map detection
 	currentMapID := ""
 	if originNode.NodePosition != nil && originNode.NodePosition.MapID != "" {
 		currentMapID = originNode.NodePosition.MapID
@@ -203,9 +200,6 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 		snap := oh.state.Snapshot()
 		currentMapID = snap.MapID
 	}
-	// Remember origin map so we can return to the counter on the starting floor
-	// (e.g. cross-floor delivery: 1F -> 6F, then take elevator back to 1F counter).
-	originMapID := currentMapID
 
 	// Process remaining nodes (skip origin at index 0)
 	for i := 1; i < len(nodes); i++ {
@@ -219,22 +213,15 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 
 		node := nodes[i]
 
-		// --- Floor change detection ---
+		// --- Cross-map guard ---
 		nextMapID := ""
 		if node.NodePosition != nil && node.NodePosition.MapID != "" {
 			nextMapID = node.NodePosition.MapID
 		}
-		if nextMapID != "" && oh.elevatorCfg != nil && oh.elevatorCfg.NeedsFloorChange(currentMapID, nextMapID) {
-			log.Printf("[Order] === Floor change detected: %s -> %s ===", currentMapID, nextMapID)
-			if err := oh.handleFloorChange(order.OrderID, currentMapID, nextMapID, cancelCh); err != nil {
-				log.Printf("[Order] Floor change failed: %v", err)
-				oh.failOrder(order.OrderID, err.Error())
-				return
-			}
-			currentMapID = nextMapID
-			log.Printf("[Order] === Floor change complete, now on map %s ===", currentMapID)
-		} else if nextMapID != "" {
-			currentMapID = nextMapID
+		if nextMapID != "" && nextMapID != currentMapID {
+			log.Printf("[Order] cross-map order not supported (%s -> %s); failing order", currentMapID, nextMapID)
+			oh.failOrder(order.OrderID, "cross_map_not_supported")
+			return
 		}
 
 		// Find the edge leading to this node
@@ -308,19 +295,6 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 	case <-waitTimer.C:
 	}
 
-	// If waypoints finished on a different floor than where the order started,
-	// take the elevator back to the origin floor before returning to counter.
-	if currentMapID != originMapID && oh.elevatorCfg != nil && oh.elevatorCfg.NeedsFloorChange(currentMapID, originMapID) {
-		log.Printf("[Order] === Return trip: taking elevator back %s -> %s ===", currentMapID, originMapID)
-		if err := oh.handleFloorChange(order.OrderID, currentMapID, originMapID, cancelCh); err != nil {
-			log.Printf("[Order] Return floor change failed: %v", err)
-			oh.failOrder(order.OrderID, err.Error())
-			return
-		}
-		currentMapID = originMapID
-		log.Printf("[Order] === Back on origin floor %s ===", currentMapID)
-	}
-
 	// Navigate back to counter
 	log.Printf("[Order] Returning to counter station via ATOM API")
 	if err := oh.navigateToStation(order.OrderID, "counter", cancelCh); err != nil {
@@ -329,7 +303,7 @@ func (oh *OrderHandler) executeOrder(order *VDA5050Order, cancelCh chan struct{}
 		return
 	}
 
-	log.Printf("[Order] === Order %s completed (returned to counter on floor %s) ===", order.OrderID, originMapID)
+	log.Printf("[Order] === Order %s completed (returned to counter) ===", order.OrderID)
 	oh.finishOrder(order.OrderID)
 }
 
@@ -880,261 +854,7 @@ func (oh *OrderHandler) cancelOrder(orderID string) {
 	oh.mu.Unlock()
 }
 
-// --- Elevator / Floor Change ---
-
-// handleFloorChange executes the full elevator flow to move the robot between floors.
-//
-// Flow (aligned with NexOS IoT Gateway v2 state machine):
-//  1.   Navigate to current floor's elevator hall station
-//  2.   switchMap to elevator tunnel map
-//  3.   SetInitialPose at tunnel's elevator hall point
-//  3.5  Re-select delivery mode
-//  4+5. tw_elevator_call → blocks until elevator arrives at current floor (FINISHED)
-//  6a.  Navigate into elevator car
-//  6b.  tw_elevator_enter → blocks until elevator arrives at target floor ("please exit" RUNNING)
-//  9.   Navigate out of elevator to tunnel hall + tw_elevator_exit (FINISHED)
-//  10.  switchMap to target floor map
-//  11.  SetInitialPose at target floor's elevator hall point
-//  11.5 Re-select delivery mode
-func (oh *OrderHandler) handleFloorChange(orderID, fromMapID, toMapID string, cancelCh chan struct{}) error {
-	fromFloor := oh.elevatorCfg.GetFloor(fromMapID)
-	toFloor := oh.elevatorCfg.GetFloor(toMapID)
-	if fromFloor == nil || toFloor == nil {
-		return fmt.Errorf("floor config not found: from=%s to=%s", fromMapID, toMapID)
-	}
-
-	ev := oh.elevatorCfg.Elevator
-	log.Printf("[Elevator] Floor change: %dF (%s) -> %dF (%s)", fromFloor.Floor, fromMapID, toFloor.Floor, toMapID)
-
-	// Step 1: Navigate to current floor's elevator hall
-	log.Printf("[Elevator] Step 1: Navigating to elevator hall '%s' on floor %d", fromFloor.ElevatorHall, fromFloor.Floor)
-	if err := oh.navigateToStation(orderID, fromFloor.ElevatorHall, cancelCh); err != nil {
-		return fmt.Errorf("navigate to elevator hall: %w", err)
-	}
-	log.Printf("[Elevator] Step 1: Arrived at elevator hall")
-
-	// Step 2: Switch to elevator tunnel map
-	log.Printf("[Elevator] Step 2: Switching to tunnel map '%s'", ev.TunnelMap)
-	if err := oh.doSwitchMap(ev.TunnelMap); err != nil {
-		return fmt.Errorf("switch to tunnel map: %w", err)
-	}
-	log.Printf("[Elevator] Step 2: Map switched to tunnel")
-
-	// Step 3: SetInitialPose at tunnel hall point
-	log.Printf("[Elevator] Step 3: SetInitialPose at tunnel hall '%s'", ev.Hall)
-	if err := oh.setPoseAtStation(ev.Hall); err != nil {
-		log.Printf("[Elevator] Step 3: setPose failed (non-fatal): %v", err)
-	} else {
-		log.Printf("[Elevator] Step 3: setPose at tunnel hall done")
-	}
-
-	// Step 3.5: Re-select delivery mode after setPose (Nav2 needs time to reinitialize)
-	log.Printf("[Elevator] Step 3.5: Re-selecting delivery mode after setPose...")
-	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
-	deliveryPayload, _ := json.Marshal(map[string]string{"select_mode": "delivery"})
-	if resp, err := oh.client.Post(commandURL, "application/json", bytes.NewReader(deliveryPayload)); err != nil {
-		log.Printf("[Elevator] Step 3.5: select_mode delivery failed: %v", err)
-	} else {
-		resp.Body.Close()
-	}
-	time.Sleep(5 * time.Second)
-	log.Printf("[Elevator] Step 3.5: Delivery mode re-selected, ready for navigation")
-
-	// Get elevator ID — only use A梯 (retry discovery up to 3 times)
-	elevatorID := ""
-	if oh.bridge.elevatorService != nil {
-		for attempt := 1; attempt <= 3; attempt++ {
-			elevatorID = oh.bridge.elevatorService.GetElevatorByName("A梯")
-			if elevatorID != "" {
-				break
-			}
-			log.Printf("[Elevator] A梯 not found (attempt %d/3), running discovery...", attempt)
-			if err := oh.bridge.elevatorService.RunDiscovery(); err != nil {
-				log.Printf("[Elevator] Discovery failed: %v", err)
-				time.Sleep(3 * time.Second)
-			}
-		}
-	}
-	if elevatorID == "" {
-		return fmt.Errorf("A梯 not available")
-	}
-	log.Printf("[Elevator] Using A梯 (id=%s)", elevatorID)
-
-	// Step 4+5: Call elevator to current floor via tw_elevator_call (blocks until ready)
-	log.Printf("[Elevator] Step 4: Calling elevator to floor %d (tw_elevator_call)", fromFloor.Floor)
-	if err := oh.bridge.elevatorService.CallElevator(elevatorID, fromFloor.Floor, toFloor.Floor); err != nil {
-		return fmt.Errorf("call elevator: %w", err)
-	}
-	log.Printf("[Elevator] Step 5: Elevator arrived at floor %d", fromFloor.Floor)
-
-	// Step 6: Enter elevator — navigate to car station first, then notify IoT Gateway
-	carStation, ok := ev.Cars["A"]
-	if !ok {
-		return fmt.Errorf("car A not found in elevator config")
-	}
-	log.Printf("[Elevator] Step 6a: Navigating to car A station '%s'", carStation)
-	if err := oh.navigateToStation(orderID, carStation, cancelCh); err != nil {
-		return fmt.Errorf("enter elevator: %w", err)
-	}
-	log.Printf("[Elevator] Step 6a: Inside elevator car A")
-
-	// Step 6b+7+8: Notify IoT Gateway robot entered → elevator departs → wait for "please exit" signal
-	log.Printf("[Elevator] Step 6b: Notifying IoT Gateway (tw_elevator_enter), waiting for arrival at floor %d...", toFloor.Floor)
-	if err := oh.bridge.elevatorService.EnterElevator(elevatorID); err != nil {
-		return fmt.Errorf("elevator travel: %w", err)
-	}
-	log.Printf("[Elevator] Step 8: Elevator arrived at floor %d", toFloor.Floor)
-
-	// Step 9: Exit elevator — navigate to tunnel hall + notify IoT Gateway
-	log.Printf("[Elevator] Step 9: Exiting elevator -> hall '%s'", ev.Hall)
-	if err := oh.navigateToStation(orderID, ev.Hall, cancelCh); err != nil {
-		return fmt.Errorf("exit elevator: %w", err)
-	}
-	log.Printf("[Elevator] Step 9: Exited elevator to hall")
-	if err := oh.bridge.elevatorService.ExitElevator(elevatorID); err != nil {
-		log.Printf("[Elevator] Step 9: exit notify failed (non-fatal): %v", err)
-	}
-
-
-	// Step 10: Switch to target floor map
-	log.Printf("[Elevator] Step 10: Switching to target floor map '%s'", toMapID)
-	if err := oh.doSwitchMap(toMapID); err != nil {
-		return fmt.Errorf("switch to target floor map: %w", err)
-	}
-
-	// Step 11: SetInitialPose at target floor's elevator hall
-	log.Printf("[Elevator] Step 11: SetInitialPose at floor %d, elevator hall '%s'",
-		toFloor.Floor, toFloor.ElevatorHall)
-	if err := oh.setPoseAtStation(toFloor.ElevatorHall); err != nil {
-		log.Printf("[Elevator] Step 11: setPose failed (non-fatal): %v", err)
-	} else {
-		log.Printf("[Elevator] Step 11: setPose at target floor hall done")
-	}
-
-	// Step 11.5: Re-select delivery mode after setPose
-	log.Printf("[Elevator] Step 11.5: Re-selecting delivery mode after setPose...")
-	commandURL2 := oh.cfg.RobotBaseURL() + "/service/control/commands"
-	deliveryPayload2, _ := json.Marshal(map[string]string{"select_mode": "delivery"})
-	if resp, err := oh.client.Post(commandURL2, "application/json", bytes.NewReader(deliveryPayload2)); err != nil {
-		log.Printf("[Elevator] Step 11.5: select_mode delivery failed: %v", err)
-	} else {
-		resp.Body.Close()
-	}
-	time.Sleep(5 * time.Second)
-	log.Printf("[Elevator] Step 11.5: Delivery mode re-selected")
-
-	log.Printf("[Elevator] Floor change complete: now on floor %d (%s)", toFloor.Floor, toMapID)
-	return nil
-}
-
-// doSwitchMap executes the ATOM API map switch sequence:
-// 1. set map parameter
-// 2. wait for map_loaded (polling routing status, up to 90s)
-// 3. select_mode delivery + wait 5s
-// 4. state.SetMapID(mapID)
-//
-// No robot_core restart needed — the ATOM API handles map switching internally.
-func (oh *OrderHandler) doSwitchMap(mapID string) error {
-	switchStart := time.Now()
-	commandURL := oh.cfg.RobotBaseURL() + "/service/control/commands"
-
-	log.Printf("[SwitchMap] Start: target map=%s", mapID)
-
-	// Step 1: Set map parameter
-	setURL := fmt.Sprintf("%s/service/parameter/set/map/%s", oh.cfg.RobotBaseURL(), mapID)
-	resp, err := oh.client.Post(setURL, "application/json", bytes.NewReader([]byte("{}")))
-	if err != nil {
-		return fmt.Errorf("set map: %w", err)
-	}
-	resp.Body.Close()
-	log.Printf("[SwitchMap] Map parameter set to %s (elapsed: %v)", mapID, time.Since(switchStart))
-
-	// Step 2: Wait for map_loaded by polling routing status (up to 90s)
-	statusURL := oh.cfg.RobotBaseURL() + "/service/system/routing/status/get"
-	deadline := time.After(90 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			log.Printf("[SwitchMap] WARNING: map_loaded timeout (90s), proceeding anyway")
-			goto mapReady
-		case <-time.After(3 * time.Second):
-			if resp, err := oh.client.Get(statusURL); err == nil {
-				var sr map[string]interface{}
-				if json.NewDecoder(resp.Body).Decode(&sr) == nil {
-					status := ""
-					if rs, ok := sr["route_status"].(map[string]interface{}); ok {
-						status, _ = rs["status"].(string)
-					}
-					if status == "map_loaded" {
-						log.Printf("[SwitchMap] map_loaded detected (elapsed: %v)", time.Since(switchStart))
-						goto mapReady
-					}
-					log.Printf("[SwitchMap] polling route_status=%s (elapsed: %v)", status, time.Since(switchStart))
-				}
-				resp.Body.Close()
-			}
-		}
-	}
-mapReady:
-
-	// Step 3: select_mode delivery + wait for ready
-	deliveryPayload, _ := json.Marshal(map[string]string{"select_mode": "delivery"})
-	resp, err = oh.client.Post(commandURL, "application/json", bytes.NewReader(deliveryPayload))
-	if err != nil {
-		return fmt.Errorf("select_mode delivery: %w", err)
-	}
-	resp.Body.Close()
-	log.Printf("[SwitchMap] select_mode delivery sent (elapsed: %v)", time.Since(switchStart))
-
-	time.Sleep(5 * time.Second)
-	log.Printf("[SwitchMap] Delivery mode ready (elapsed: %v)", time.Since(switchStart))
-
-	// Step 4: Update state
-	oh.state.SetMapID(mapID)
-	log.Printf("[SwitchMap] Completed: map=%s (total: %v)", mapID, time.Since(switchStart))
-	return nil
-}
-
-
-// setPoseAtStation queries POI data from FastAPI to find a station's coordinates,
-// then calls SetInitialPose via WebSocket to relocalize the robot.
-func (oh *OrderHandler) setPoseAtStation(stationName string) error {
-	url := oh.cfg.RobotFastAPI + "/poi_data"
-	resp, err := oh.client.Get(url)
-	if err != nil {
-		return fmt.Errorf("get poi_data: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	var raw struct {
-		Point map[string]struct {
-			Name  string  `json:"name"`
-			X     float64 `json:"x"`
-			Y     float64 `json:"y"`
-			Angle float64 `json:"angle"`
-		} `json:"point"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return fmt.Errorf("parse poi_data: %w", err)
-	}
-
-	for _, p := range raw.Point {
-		if p.Name == stationName {
-			// Convert degrees to radians, normalize to [-pi, pi]
-			yawDeg := p.Angle
-			if yawDeg > 180 {
-				yawDeg -= 360
-			}
-			yawRad := yawDeg * math.Pi / 180.0
-			log.Printf("[Elevator] setPoseAtStation: %s -> x=%.3f y=%.3f yaw=%.1f° (%.4f rad)",
-				stationName, p.X, p.Y, p.Angle, yawRad)
-			return oh.robotWS.SetInitialPose(p.X, p.Y, yawRad)
-		}
-	}
-	return fmt.Errorf("station '%s' not found in POI data", stationName)
-}
+// --- Helpers ---
 
 // ensureNotCharging checks if the robot is currently charging and, if so,
 // sends leave_charger and waits for charging to stop before returning.
