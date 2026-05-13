@@ -14,9 +14,10 @@ import (
 
 // TTSClient talks to atomros2-tts (https://github.com/JINHER-INFO/atomros2-tts).
 // API expected on the Genio side:
-//   POST /prepare {id,text}  -> background synth, cached by id
-//   POST /play    {id}       -> play cached audio, auto-remove
-//   DELETE /cache?id=X       -> manual eviction
+//
+//	POST /prepare {id,text}  -> background synth, cached by id
+//	POST /play    {id}       -> play cached audio, auto-remove
+//	DELETE /cache?id=X       -> manual eviction
 //
 // Failure mode is tolerant: TTS errors NEVER block order execution.
 // If the TTS server is unreachable we just log and continue — the robot

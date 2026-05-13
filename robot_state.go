@@ -40,12 +40,12 @@ type RobotState struct {
 	LastScanRear map[string]interface{}
 
 	// Order state (Phase 1: mostly empty)
-	OrderID           string
-	OrderUpdateID     uint32
-	LastNodeID        string
+	OrderID            string
+	OrderUpdateID      uint32
+	LastNodeID         string
 	LastNodeSequenceID uint32
-	NewBaseRequest    bool
-	Paused            bool
+	NewBaseRequest     bool
+	Paused             bool
 
 	// Action states
 	ActionStates []ActionState
@@ -61,9 +61,9 @@ type RobotState struct {
 	MapList []string
 
 	// Timestamps
-	LastUpdate       time.Time
-	PositionInit     bool
-	ConnectionState  string // "ONLINE", "OFFLINE", "CONNECTIONBROKEN"
+	LastUpdate      time.Time
+	PositionInit    bool
+	ConnectionState string // "ONLINE", "OFFLINE", "CONNECTIONBROKEN"
 }
 
 type ActionState struct {
@@ -75,24 +75,24 @@ type ActionState struct {
 }
 
 type NodeState struct {
-	NodeID      string `json:"nodeId"`
-	SequenceID  uint32 `json:"sequenceId"`
-	Released    bool   `json:"released"`
+	NodeID          string `json:"nodeId"`
+	SequenceID      uint32 `json:"sequenceId"`
+	Released        bool   `json:"released"`
 	NodeDescription string `json:"nodeDescription,omitempty"`
 }
 
 type EdgeState struct {
-	EdgeID      string `json:"edgeId"`
-	SequenceID  uint32 `json:"sequenceId"`
-	Released    bool   `json:"released"`
+	EdgeID          string `json:"edgeId"`
+	SequenceID      uint32 `json:"sequenceId"`
+	Released        bool   `json:"released"`
 	EdgeDescription string `json:"edgeDescription,omitempty"`
 }
 
 type AGVError struct {
-	ErrorType        string              `json:"errorType"` // WARNING, FATAL
-	ErrorReferences  []ErrorReference    `json:"errorReferences,omitempty"`
-	ErrorDescription string              `json:"errorDescription"`
-	ErrorLevel       string              `json:"errorLevel"` // WARNING, FATAL
+	ErrorType        string           `json:"errorType"` // WARNING, FATAL
+	ErrorReferences  []ErrorReference `json:"errorReferences,omitempty"`
+	ErrorDescription string           `json:"errorDescription"`
+	ErrorLevel       string           `json:"errorLevel"` // WARNING, FATAL
 }
 
 type ErrorReference struct {
@@ -117,21 +117,21 @@ func NewRobotState() *RobotState {
 
 // Snapshot returns a copy of the state for reading.
 type StateSnapshot struct {
-	PoseX          float64
-	PoseY          float64
-	PoseYaw        float64
-	MapID          string
-	Driving        bool
-	VelocityVX     float64
-	VelocityVY     float64
-	VelocityOmega  float64
-	BatteryPercent float64
-	BatteryVoltage float64
+	PoseX           float64
+	PoseY           float64
+	PoseYaw         float64
+	MapID           string
+	Driving         bool
+	VelocityVX      float64
+	VelocityVY      float64
+	VelocityOmega   float64
+	BatteryPercent  float64
+	BatteryVoltage  float64
 	BatteryCharging bool
-	OperatingMode  string
-	Status         string
-	Target         string
-	Event          string
+	OperatingMode   string
+	Status          string
+	Target          string
+	Event           string
 
 	OrderID            string
 	OrderUpdateID      uint32
@@ -146,9 +146,9 @@ type StateSnapshot struct {
 	Errors       []AGVError
 	Loads        []interface{}
 
-	MapList        []string
-	LastUpdate     time.Time
-	PositionInit   bool
+	MapList         []string
+	LastUpdate      time.Time
+	PositionInit    bool
 	ConnectionState string
 }
 
@@ -337,5 +337,3 @@ func (rs *RobotState) DrainNavArrived() {
 	default:
 	}
 }
-
-

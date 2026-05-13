@@ -13,23 +13,33 @@ import (
 	"time"
 )
 
-// RegisterWebhook registers this Pi's webhook URL with the robot's ATOM API.
-// It retries on failure with exponential backoff.
-// After registration, it switches the robot to delivery mode.
-func RegisterWebhook(cfg *Config, listenAddr string) {
+// RegisterWebhook registers this robot's webhook URL with the robot's ATOM API.
+// If webhookURLOrAddr already starts with "http://" or "https://", it is used verbatim.
+// Otherwise it is treated as a listen-addr (":5201", "0.0.0.0:5201") and the URL is
+// constructed from the local IP that can reach the robot.
+// It retries on failure with exponential backoff and then switches to delivery mode.
+func RegisterWebhook(cfg *Config, webhookURLOrAddr string, stopCh <-chan struct{}) {
 	go func() {
 		// Wait for server to be ready
-		time.Sleep(2 * time.Second)
-
-		myIP := getLocalIP(cfg.RobotIP)
-		// Extract port from listenAddr (handles ":5201", "0.0.0.0:5201", "5201")
-		port := listenAddr
-		if idx := strings.LastIndex(port, ":"); idx >= 0 {
-			port = port[idx+1:]
+		select {
+		case <-stopCh:
+			return
+		case <-time.After(2 * time.Second):
 		}
 
-		webhookURL := fmt.Sprintf("http://%s:%s/", myIP, port)
-		log.Printf("[Register] Local IP: %s, Webhook URL: %s", myIP, webhookURL)
+		var webhookURL string
+		if strings.HasPrefix(webhookURLOrAddr, "http://") || strings.HasPrefix(webhookURLOrAddr, "https://") {
+			webhookURL = webhookURLOrAddr
+		} else {
+			myIP := getLocalIP(cfg.RobotIP)
+			// Extract port from listenAddr (handles ":5201", "0.0.0.0:5201", "5201")
+			port := webhookURLOrAddr
+			if idx := strings.LastIndex(port, ":"); idx >= 0 {
+				port = port[idx+1:]
+			}
+			webhookURL = fmt.Sprintf("http://%s:%s/", myIP, port)
+		}
+		log.Printf("[Register] Webhook URL: %s", webhookURL)
 
 		retryInterval := 5 * time.Second
 		maxRetry := 30 * time.Second
@@ -38,7 +48,11 @@ func RegisterWebhook(cfg *Config, listenAddr string) {
 			err := doRegister(cfg.RobotBaseURL(), webhookURL)
 			if err != nil {
 				log.Printf("[Register] Failed: %v (retry in %v)", err, retryInterval)
-				time.Sleep(retryInterval)
+				select {
+				case <-stopCh:
+					return
+				case <-time.After(retryInterval):
+				}
 				if retryInterval < maxRetry {
 					retryInterval = retryInterval * 2
 					if retryInterval > maxRetry {
@@ -52,11 +66,24 @@ func RegisterWebhook(cfg *Config, listenAddr string) {
 		}
 
 		// Wait for robot's Nav2 stack to be fully ready, then switch to delivery mode
-		go activateDeliveryMode(cfg)
+		go activateDeliveryMode(cfg, stopCh)
 
 		// Keep re-registering periodically to handle robot restarts
-		go keepAliveRegister(cfg.RobotBaseURL(), webhookURL)
+		go keepAliveRegister(cfg.RobotBaseURL(), webhookURL, stopCh)
 	}()
+}
+
+// sleepOrStop waits for d or until stopCh is closed. It returns true if the
+// full duration elapsed, false if stopCh fired (caller should bail out).
+func sleepOrStop(d time.Duration, stopCh <-chan struct{}) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-stopCh:
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 func doRegister(robotBaseURL, webhookURL string) error {
@@ -97,12 +124,17 @@ func doRegister(robotBaseURL, webhookURL string) error {
 }
 
 // keepAliveRegister re-registers every 60 seconds to handle robot restarts.
-func keepAliveRegister(robotBaseURL, webhookURL string) {
+func keepAliveRegister(robotBaseURL, webhookURL string, stopCh <-chan struct{}) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		if err := doRegister(robotBaseURL, webhookURL); err != nil {
-			log.Printf("[Register] Keep-alive re-register failed: %v", err)
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			if err := doRegister(robotBaseURL, webhookURL); err != nil {
+				log.Printf("[Register] Keep-alive re-register failed: %v", err)
+			}
 		}
 	}
 }
@@ -116,9 +148,13 @@ func keepAliveRegister(robotBaseURL, webhookURL string) {
 //  3. POST /service/control/commands → stop_robot_core (stops all ROS services)
 //  4. Wait for node_manager auto-restart (via .bashrc on tty1), or start_robot_core as fallback
 //  5. start_robot_core defaults to delivery mode with the selected map
-func activateDeliveryMode(cfg *Config) {
+func activateDeliveryMode(cfg *Config, stopCh <-chan struct{}) {
 	log.Println("[Delivery] Waiting 30s for Nav2 stack to be ready...")
-	time.Sleep(30 * time.Second)
+	select {
+	case <-stopCh:
+		return
+	case <-time.After(30 * time.Second):
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	baseURL := cfg.RobotBaseURL()
@@ -145,7 +181,9 @@ func activateDeliveryMode(cfg *Config) {
 		resp, err := client.Post(setMapURL, "application/json", bytes.NewReader([]byte("{}")))
 		if err != nil {
 			log.Printf("[Delivery] Set map attempt %d failed: %v", attempt, err)
-			time.Sleep(5 * time.Second)
+			if !sleepOrStop(5*time.Second, stopCh) {
+				return
+			}
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)
@@ -154,7 +192,9 @@ func activateDeliveryMode(cfg *Config) {
 		break
 	}
 
-	time.Sleep(2 * time.Second)
+	if !sleepOrStop(2*time.Second, stopCh) {
+		return
+	}
 
 	// Wait for map_loaded by polling routing status (up to 90s)
 	// No robot_core restart needed — set/map API handles switching directly
@@ -166,6 +206,8 @@ func activateDeliveryMode(cfg *Config) {
 	defer pollTicker.Stop()
 	for {
 		select {
+		case <-stopCh:
+			return
 		case <-mapLoadDeadline.C:
 			log.Println("[Delivery] WARNING: map_loaded timeout (90s), proceeding anyway")
 			goto mapLoadDone
@@ -188,7 +230,9 @@ func activateDeliveryMode(cfg *Config) {
 mapLoadDone:
 
 	// Stabilization buffer
-	time.Sleep(5 * time.Second)
+	if !sleepOrStop(5*time.Second, stopCh) {
+		return
+	}
 
 	// Step 6: Ensure delivery mode (select_mode: delivery, NO map_name per official docs)
 	deliveryPayload, _ := json.Marshal(map[string]string{"select_mode": "delivery"})
@@ -196,7 +240,9 @@ mapLoadDone:
 		resp, err := client.Post(commandURL, "application/json", bytes.NewReader(deliveryPayload))
 		if err != nil {
 			log.Printf("[Delivery] select_mode delivery attempt %d failed: %v", attempt, err)
-			time.Sleep(5 * time.Second)
+			if !sleepOrStop(5*time.Second, stopCh) {
+				return
+			}
 			continue
 		}
 		body, _ := io.ReadAll(resp.Body)

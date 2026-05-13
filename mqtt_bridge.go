@@ -4,40 +4,41 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 type MQTTBridge struct {
+	clientMu   sync.RWMutex
 	client     mqtt.Client
 	cfg        *Config
 	state      *RobotState
 	mapService *MapService
 	robotWS    *RobotWSClient
-	elevatorCfg *ElevatorConfig
+	store      *Store // may be nil (unit tests)
 
 	// Channels for triggering immediate publishes
 	stateRequestCh chan struct{}
 	stopCh         chan struct{}
+	stopOnce       sync.Once
 
 	// InstantAction handler
 	actionHandler *InstantActionHandler
 
 	// Order handler
 	orderHandler *OrderHandler
-
-	// Elevator service (discovery + status + call/enter/exit)
-	elevatorService *ElevatorService
 }
 
-func NewMQTTBridge(cfg *Config, state *RobotState, mapService *MapService, robotWS *RobotWSClient, elevatorCfg *ElevatorConfig) *MQTTBridge {
+func NewMQTTBridge(cfg *Config, state *RobotState, mapService *MapService, robotWS *RobotWSClient, store *Store) *MQTTBridge {
 	return &MQTTBridge{
 		cfg:            cfg,
 		state:          state,
 		mapService:     mapService,
 		robotWS:        robotWS,
-		elevatorCfg:    elevatorCfg,
+		store:          store,
 		stateRequestCh: make(chan struct{}, 1),
 		stopCh:         make(chan struct{}),
 	}
@@ -47,7 +48,7 @@ func (mb *MQTTBridge) Connect() error {
 	// Initialize handlers before connecting so onConnect subscriptions
 	// can handle messages immediately
 	mb.actionHandler = NewInstantActionHandler(mb.cfg, mb.state, mb.mapService, mb, mb.robotWS)
-	mb.orderHandler = NewOrderHandler(mb.cfg, mb.state, mb, mb.robotWS, mb.elevatorCfg)
+	mb.orderHandler = NewOrderHandler(mb.cfg, mb.state, mb, mb.robotWS, mb.store)
 
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(mb.cfg.MQTTBroker)
@@ -80,8 +81,12 @@ func (mb *MQTTBridge) Connect() error {
 		mb.state.SetConnectionState("CONNECTIONBROKEN")
 	})
 
+	mb.clientMu.Lock()
 	mb.client = mqtt.NewClient(opts)
+	mb.clientMu.Unlock()
+	mb.clientMu.RLock()
 	token := mb.client.Connect()
+	mb.clientMu.RUnlock()
 	if !token.WaitTimeout(10 * time.Second) {
 		return fmt.Errorf("MQTT connect timeout")
 	}
@@ -241,10 +246,13 @@ func (mb *MQTTBridge) TriggerStatePublish() {
 }
 
 func (mb *MQTTBridge) publish(topic string, payload []byte, qos byte, retained bool) {
-	if mb.client == nil || !mb.client.IsConnected() {
+	mb.clientMu.RLock()
+	c := mb.client
+	mb.clientMu.RUnlock()
+	if c == nil || !c.IsConnected() {
 		return
 	}
-	token := mb.client.Publish(topic, qos, retained, payload)
+	token := c.Publish(topic, qos, retained, payload)
 	token.WaitTimeout(2 * time.Second)
 	if token.Error() != nil {
 		log.Printf("[MQTT] Publish error on %s: %v", topic, token.Error())
@@ -257,17 +265,6 @@ func (mb *MQTTBridge) handleInstantActions(payload []byte) {
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		log.Printf("[MQTT] Failed to parse instantActions: %v", err)
 		return
-	}
-
-	// --- Handle actionStates (responses from IoT Gateway) ---
-	if rawStates, ok := raw["actionStates"]; ok {
-		var states []ActionStateMsg
-		if err := json.Unmarshal(rawStates, &states); err == nil && len(states) > 0 {
-			if mb.elevatorService != nil {
-				mb.elevatorService.HandleActionStates(states)
-			}
-			return // actionStates messages are responses, not actions to execute
-		}
 	}
 
 	// --- Handle instantActions / actions (commands from platform) ---
@@ -313,12 +310,22 @@ func (mb *MQTTBridge) handleInstantActions(payload []byte) {
 }
 
 func (mb *MQTTBridge) Stop() {
-	close(mb.stopCh)
+	mb.stopOnce.Do(func() {
+		close(mb.stopCh)
 
-	// Publish OFFLINE connection
-	mb.publishConnection("OFFLINE")
+		// Publish OFFLINE connection
+		mb.publishConnection("OFFLINE")
 
-	if mb.client != nil && mb.client.IsConnected() {
-		mb.client.Disconnect(1000)
-	}
+		mb.clientMu.RLock()
+		c := mb.client
+		mb.clientMu.RUnlock()
+		if c != nil && c.IsConnected() {
+			c.Disconnect(1000)
+		}
+	})
+}
+
+// isTwAction checks if an action type is a T-Extension action (meant for IoT Gateway).
+func isTwAction(actionType string) bool {
+	return strings.HasPrefix(actionType, "tw_")
 }

@@ -138,17 +138,6 @@ func buildInformations(snap StateSnapshot, cfg *Config) []map[string]interface{}
 		})
 	}
 
-	if tunnelURL := GetTunnelURL(); tunnelURL != "" {
-		infos = append(infos, map[string]interface{}{
-			"infoType":        "tunnelUrl",
-			"infoDescription": tunnelURL,
-			"infoLevel":       "INFO",
-			"infoReferences": []map[string]string{
-				{"referenceKey": "url", "referenceValue": tunnelURL},
-			},
-		})
-	}
-
 	for _, mapID := range snap.MapList {
 		isCurrent := "false"
 		if mapID == snap.MapID {

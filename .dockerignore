@@ -1,0 +1,5 @@
+.git
+docs
+*_test.go
+robots.yaml
+.env

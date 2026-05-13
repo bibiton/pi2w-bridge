@@ -1,0 +1,25 @@
+services:
+  bridge:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "5201:5201"
+    environment:
+      LISTEN_ADDR: ":5201"
+      PUBLIC_BASE_URL: "https://bridge.example.com"
+      DB_PATH: "/data/pi2w-bridge.db"
+      ROBOTS_YAML: "/config/robots.yaml"
+      MQTT_BROKER: "wss://nexmqtt.jini.tw:443/mqtt"
+      MQTT_USER: "bibi"
+      MQTT_PASS: "70595145"
+      MQTT_PREFIX: "/uagv/v2"
+      VDA_MANUFACTURER: "Atom"
+      ROBOT_PORT: "8080"
+      TTS_URL: ""
+      ADMIN_TOKEN: "change-me"
+      DEFAULT_ROBOT_SECRET: "change-me"
+    volumes:
+      - bridge-data:/data
+      - ./robots.yaml:/config/robots.yaml:ro
+volumes:
+  bridge-data:
