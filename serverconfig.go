@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"net/url"
 	"strings"
 
@@ -19,6 +20,7 @@ type ServerConfig struct {
 	MQTTPrefix string
 
 	Manufacturer string // default VDA manufacturer when a RobotRecord omits it
+	RobotPort    string // default port for the robot's HTTP/WS API when a URL omits one
 	TTSURL       string // default atomros2-tts URL; empty disables voice
 
 	AdminToken         string // bearer token for /admin/*
@@ -30,12 +32,13 @@ func LoadServerConfig() *ServerConfig {
 	return &ServerConfig{
 		ListenAddr:         envOrDefault("LISTEN_ADDR", ":5201"),
 		PublicBaseURL:      envOrDefault("PUBLIC_BASE_URL", "http://127.0.0.1:5201"),
-		DBPath:             envOrDefault("DB_PATH", "/data/pi2w-bridge.db"),
+		DBPath:             envOrDefault("DB_PATH", "pi2w-bridge.db"),
 		MQTTBroker:         envOrDefault("MQTT_BROKER", "wss://nexmqtt.jini.tw:443/mqtt"),
 		MQTTUser:           envOrDefault("MQTT_USER", "bibi"),
 		MQTTPass:           envOrDefault("MQTT_PASS", "70595145"),
 		MQTTPrefix:         envOrDefault("MQTT_PREFIX", "/uagv/v2"),
-		Manufacturer:       envOrDefault("VDA_MANUFACTURER", "atom"),
+		Manufacturer:       envOrDefault("VDA_MANUFACTURER", "Atom"),
+		RobotPort:          envOrDefault("ROBOT_PORT", "8080"),
 		TTSURL:             envOrDefault("TTS_URL", ""),
 		AdminToken:         envOrDefault("ADMIN_TOKEN", "pi2w-admin-changeme"),
 		DefaultRobotSecret: envOrDefault("DEFAULT_ROBOT_SECRET", "pi2w-webhook-changeme"),
@@ -80,10 +83,16 @@ func LoadConfigForRobot(rec RobotRecord, srv *ServerConfig) *Config {
 	if serial == "" {
 		serial = rec.ID
 	}
-	ip, port := hostPort(rec.AtomBaseURL, "8080")
+	defPort := srv.RobotPort
+	if defPort == "" {
+		defPort = "8080"
+	}
+	ip, port := hostPort(rec.AtomBaseURL, defPort)
+	// FastAPI defaults to the same host:port as the ATOM API (many deployments
+	// serve both on one port). Override per robot via fastapiHTTPURL / fastapiWSURL.
 	fastapi := rec.FastAPIHTTPURL
 	if fastapi == "" && ip != "" {
-		fastapi = "http://" + ip + ":8000"
+		fastapi = "http://" + net.JoinHostPort(ip, port)
 	}
 	secret := rec.WebhookSecret
 	if secret == "" {

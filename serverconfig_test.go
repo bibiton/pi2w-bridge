@@ -57,3 +57,28 @@ func TestLoadConfigForRobot(t *testing.T) {
 		t.Errorf("MQTT broker should come from server config")
 	}
 }
+
+func TestLoadConfigForRobot_PortDefaults(t *testing.T) {
+	os.Clearenv()
+	os.Setenv("ROBOT_PORT", "8802")
+	srv := LoadServerConfig()
+	if srv.RobotPort != "8802" {
+		t.Fatalf("RobotPort = %q, want 8802", srv.RobotPort)
+	}
+
+	// atomBaseURL without a port → ROBOT_PORT is used; FastAPI defaults to the
+	// same host:port as the ATOM API.
+	cfg := LoadConfigForRobot(RobotRecord{ID: "r1", AtomBaseURL: "http://10.0.0.5"}, srv)
+	if cfg.RobotIP != "10.0.0.5" || cfg.RobotPort != "8802" {
+		t.Errorf("IP/Port = %q/%q, want 10.0.0.5/8802", cfg.RobotIP, cfg.RobotPort)
+	}
+	if cfg.RobotFastAPI != "http://10.0.0.5:8802" {
+		t.Errorf("RobotFastAPI = %q, want http://10.0.0.5:8802", cfg.RobotFastAPI)
+	}
+
+	// An explicit port in atomBaseURL wins over ROBOT_PORT.
+	cfg = LoadConfigForRobot(RobotRecord{ID: "r2", AtomBaseURL: "http://10.0.0.6:9000"}, srv)
+	if cfg.RobotPort != "9000" || cfg.RobotFastAPI != "http://10.0.0.6:9000" {
+		t.Errorf("explicit port: Port=%q FastAPI=%q", cfg.RobotPort, cfg.RobotFastAPI)
+	}
+}

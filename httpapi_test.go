@@ -76,24 +76,46 @@ func TestAPI_AdminRegisterThenWebhook(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d %s", rec.Code, rec.Body.String())
 	}
+
+	// Missing X-Webhook-Secret header → accepted (fail open for robots that don't send it).
+	rec = httptest.NewRecorder()
+	wreq = httptest.NewRequest("POST", "/webhook/r1", strings.NewReader(`[{"foo":1}]`))
+	api.mux.ServeHTTP(rec, wreq)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 with no secret header, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Trailing-slash webhook URL → robot appends a data-source segment
+	// (".../webhook/r1/imu"); only the first segment is the robot key, so these
+	// route to r1 and don't spawn new sessions.
+	for _, p := range []string{"/webhook/r1/imu", "/webhook/r1/encoder", "/webhook/r1/"} {
+		rec = httptest.NewRecorder()
+		wreq = httptest.NewRequest("POST", p, strings.NewReader(`[{"foo":1}]`))
+		wreq.Header.Set("X-Webhook-Secret", "abc")
+		api.mux.ServeHTTP(rec, wreq)
+		if rec.Code != 200 {
+			t.Fatalf("POST %s: expected 200, got %d %s", p, rec.Code, rec.Body.String())
+		}
+	}
 }
 
-func TestAPI_WebhookUnknownRobotProvisional(t *testing.T) {
+func TestAPI_WebhookUnmanagedRobotDropped(t *testing.T) {
 	t.Parallel()
 	api, mgr, st := newTestAPI(t)
-	rec := httptest.NewRecorder()
-	wreq := httptest.NewRequest("POST", "/webhook/newbot", strings.NewReader(`[{"foo":1}]`))
-	wreq.RemoteAddr = "5.6.7.8:55555"
-	api.mux.ServeHTTP(rec, wreq)
-	if rec.Code != http.StatusAccepted && rec.Code != 200 {
-		t.Fatalf("expected 202/200 for provisional, got %d %s", rec.Code, rec.Body.String())
+	for _, p := range []string{"/webhook/newbot", "/webhook/r1imu", "/webhook/newbot/encoder"} {
+		rec := httptest.NewRecorder()
+		wreq := httptest.NewRequest("POST", p, strings.NewReader(`[{"foo":1}]`))
+		wreq.RemoteAddr = "5.6.7.8:55555"
+		api.mux.ServeHTTP(rec, wreq)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("POST %s: expected 404, got %d %s", p, rec.Code, rec.Body.String())
+		}
 	}
-	if mgr.Get("newbot") == nil {
-		t.Fatalf("provisional session not created")
+	if mgr.Get("newbot") != nil || mgr.Get("r1imu") != nil {
+		t.Fatal("unmanaged webhook must not create a session")
 	}
-	got, _ := st.GetRobot("newbot")
-	if got.Status != "provisional" {
-		t.Errorf("status = %q, want provisional", got.Status)
+	if got, _ := st.GetRobot("newbot"); got.ID != "" {
+		t.Fatalf("unmanaged webhook must not persist a record, got %+v", got)
 	}
 }
 

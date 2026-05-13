@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -68,6 +67,10 @@ func (a *APIServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (a *APIServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimPrefix(r.URL.Path, "/webhook/")
+	// ATOM robots append a data-source suffix to the configured webhook URL
+	// (e.g. .../webhook/<id>/imu, .../webhook/<id>/encoder for the odometry
+	// streams). Only the first path segment identifies the robot.
+	key, _, _ = strings.Cut(key, "/")
 	if key == "" {
 		http.Error(w, "missing robot key", 400)
 		return
@@ -80,58 +83,35 @@ func (a *APIServer) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
-	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	defer r.Body.Close()
 
 	sess := a.mgr.Get(key)
 	if sess == nil {
-		if rec, err := a.provisionRobot(key, r); err == nil {
-			_ = a.mgr.Register(rec)
-			sess = a.mgr.Get(key)
-		}
-		if sess == nil {
-			http.Error(w, "unknown robot", 404)
+		// Only robots declared in robots.yaml / via /admin/robots are managed;
+		// drop webhook data from anything else. (An unknown key often carries an
+		// ATOM data-source suffix, e.g. "<id>imu", and shows up only until the
+		// robot picks up the trailing-slash webhook URL.)
+		log.Printf("[API] webhook for unmanaged robot %q — dropped", key)
+		http.Error(w, "unknown robot", http.StatusNotFound)
+		return
+	}
+	// X-Webhook-Secret: ATOM robots don't always send this header on their webhook
+	// POSTs, so we fail open on a missing header (the {robotKey} path segment is the
+	// only thing gating these POSTs then) but still reject a present-but-wrong secret.
+	// TODO: tighten once we confirm the ATOM API can attach a custom header at webhook
+	// registration time.
+	if want := sess.WebhookSecret(); want != "" {
+		if got := r.Header.Get("X-Webhook-Secret"); got != "" && got != want {
+			http.Error(w, "bad webhook secret", http.StatusUnauthorized)
 			return
 		}
-		sess.HandleWebhook(body)
-		w.WriteHeader(http.StatusAccepted)
-		fmt.Fprint(w, "provisional ok")
-		return
 	}
-	if got := r.Header.Get("X-Webhook-Secret"); got != sess.WebhookSecret() {
-		http.Error(w, "bad webhook secret", http.StatusUnauthorized)
-		return
-	}
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if len(body) > 0 {
 		sess.HandleWebhook(body)
 	}
 	w.WriteHeader(200)
 	fmt.Fprint(w, "ok")
-}
-
-func (a *APIServer) provisionRobot(key string, r *http.Request) (RobotRecord, error) {
-	if a.store != nil {
-		if rec, err := a.store.GetRobot(key); err == nil && rec.ID != "" && rec.Status != "deleted" {
-			return rec, nil
-		}
-	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if host == "" {
-		return RobotRecord{}, fmt.Errorf("no source ip")
-	}
-	rec := RobotRecord{
-		ID: key, Serial: key, Manufacturer: a.srv.Manufacturer,
-		AtomBaseURL:    "http://" + host + ":8080",
-		FastAPIHTTPURL: "http://" + host + ":8000",
-		FastAPIWSURL:   "ws://" + host + ":8000/ws",
-		WebhookSecret:  a.srv.DefaultRobotSecret,
-		Status:         "provisional", Source: "provisional",
-	}
-	if a.store != nil {
-		_ = a.store.UpsertRobot(rec)
-	}
-	log.Printf("[API] provisioned robot %s from %s", key, host)
-	return rec, nil
 }
 
 func (a *APIServer) requireAdmin(w http.ResponseWriter, r *http.Request) bool {

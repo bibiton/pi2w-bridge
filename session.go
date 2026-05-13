@@ -75,7 +75,11 @@ func (s *RobotSession) Start() {
 	go s.safe("FetchInitialMapID", func() { FetchInitialMapID(s.mapService, s.state, s.cfg) })
 	StartMapListLoop(s.mapService, s.state)
 
-	webhookURL := s.srv.PublicBaseURL + "/webhook/" + s.rec.ID
+	// Trailing slash: ATOM robots concatenate a data-source suffix onto this URL
+	// (".../webhook/<id>" + "imu"), so end it with "/" to keep that suffix a
+	// distinct path segment (".../webhook/<id>/imu"). handleWebhook only uses the
+	// first segment as the robot key.
+	webhookURL := s.srv.PublicBaseURL + "/webhook/" + s.rec.ID + "/"
 	go s.safe("RegisterWebhook", func() { RegisterWebhook(s.cfg, webhookURL, s.stopCh) })
 
 	go s.safe("statusLogger", func() { s.statusLoop() })

@@ -34,13 +34,14 @@ All settings have working defaults so the service starts out of the box. Overrid
 |---|---|---|
 | `LISTEN_ADDR` | `:5201` | HTTP server bind address (webhook + admin) |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:5201` | Base URL robots use to reach our webhook; sessions register `<PUBLIC_BASE_URL>/webhook/<robotID>` with each robot |
-| `DB_PATH` | `/data/pi2w-bridge.db` | SQLite file path |
+| `DB_PATH` | `pi2w-bridge.db` | SQLite file path (relative to the process's working directory) |
 | `ROBOTS_YAML` | `robots.yaml` | Path to the robots declaration file (hot-reloaded) |
 | `MQTT_BROKER` | `wss://nexmqtt.jini.tw:443/mqtt` | VDA5050 MQTT broker |
 | `MQTT_USER` | `bibi` | MQTT username |
 | `MQTT_PASS` | `70595145` | MQTT password |
 | `MQTT_PREFIX` | `/uagv/v2` | VDA5050 topic prefix |
-| `VDA_MANUFACTURER` | `atom` | Default VDA5050 `manufacturer` when a robot record omits it |
+| `VDA_MANUFACTURER` | `Atom` | Default VDA5050 `manufacturer` when a robot record omits it |
+| `ROBOT_PORT` | `8080` | Default port for a robot's HTTP/WS API when `atomBaseURL` omits one |
 | `TTS_URL` | *(empty)* | atomros2-tts service URL; empty disables `playVoice` |
 | `ADMIN_TOKEN` | `pi2w-admin-changeme` | Bearer token for `/admin/*` — **change in prod** |
 | `DEFAULT_ROBOT_SECRET` | `pi2w-webhook-changeme` | `X-Webhook-Secret` used when a robot record omits one — **change in prod** |
@@ -56,26 +57,26 @@ cp robots.example.yaml robots.yaml   # robots.yaml is gitignored
 ```yaml
 robots:
   - id: adai01            # also the {robotKey} in the webhook path; defaults serial to this if omitted
-    manufacturer: atom    # optional, falls back to VDA_MANUFACTURER
+    manufacturer: Atom    # optional, falls back to VDA_MANUFACTURER
     serial: adai01        # optional, falls back to id
-    atomBaseURL: http://1.2.3.4:8080      # the robot's public ATOM API
-    fastapiHTTPURL: http://1.2.3.4:8000   # optional, defaults to http://<atom-host>:8000
-    fastapiWSURL: ws://1.2.3.4:8000/ws    # the robot's FastAPI WebSocket
+    atomBaseURL: http://1.2.3.4:8080      # the robot's public ATOM API (port falls back to ROBOT_PORT)
+    fastapiHTTPURL: http://1.2.3.4:8080   # optional, defaults to the same host:port as atomBaseURL
+    fastapiWSURL: ws://1.2.3.4:8080/ws    # optional; "disabled" (or none/off/-) turns the WS client off
     webhookSecret: change-me-per-robot    # optional, falls back to DEFAULT_ROBOT_SECRET
 ```
+
+`fastapiWSURL` is the robot's FastAPI WebSocket — used only for the `initPosition` instant action (pushing an initial pose to relocalize) and a redundant `tracked_pose` stream. If the robot doesn't expose it, set `fastapiWSURL: disabled` so the bridge doesn't loop on a doomed reconnect; `initPosition` then returns an error and everything else (orders, telemetry, maps, voice) is unaffected.
 
 Save the file — changes apply immediately (fsnotify watches it). Removing a robot from the file deregisters it.
 
 ## Robot Registration
 
-There are three ways to register a robot; all funnel to the same session-start logic:
+A robot is managed only if it's declared — there is no auto-provisioning. Two ways to declare one (both funnel to the same session-start logic):
 
-1. **On startup** — every non-deleted robot in the SQLite DB is loaded and a session started.
-2. **`robots.yaml`** — declared robots are registered; the file is hot-reloaded at runtime.
-3. **First webhook from an unknown robot** — when `POST /webhook/{robotKey}` arrives for an unrecognized `robotKey`:
-   - If a DB record exists, use it.
-   - Otherwise auto-provision one from the request's source IP + conventional ports (`:8080` ATOM, `:8000` FastAPI), store it with `status=provisional`, start a session, and return `202`.
-   - Pre-requisite: the robot must be configured once to POST its webhook to `<PUBLIC_BASE_URL>/webhook/<robotKey>` (a one-time robot config, no robot software change required).
+1. **`robots.yaml`** — declared robots are registered; the file is hot-reloaded at runtime. (On startup, every non-deleted robot already in the SQLite DB — i.e. previously declared — is also loaded.)
+2. **`POST /admin/robots`** — register/update a robot at runtime via the admin API.
+
+A `POST /webhook/{robotKey}` for a `robotKey` that isn't a managed robot is dropped (`404`). Sessions register `<PUBLIC_BASE_URL>/webhook/<robotID>/` (note the trailing slash) with each robot; ATOM robots concatenate a data-source name onto that URL for the odometry streams (e.g. `…/webhook/<robotID>/imu`, `…/webhook/<robotID>/encoder`), so the bridge uses only the **first path segment** after `/webhook/` as the robot key. (A robot still configured with an old slash-less URL will briefly POST to `…/webhook/<robotID>imu` and get `404`s until it re-reads the registration — the bridge re-registers every 60 s.)
 
 There is no UI. Onboarding a robot means adding a block to `robots.yaml` or calling `POST /admin/robots`.
 
@@ -83,7 +84,7 @@ There is no UI. Onboarding a robot means adding a block to `robots.yaml` or call
 
 | Method + Path | Auth | Purpose |
 |---|---|---|
-| `POST /webhook/{robotKey}` | `X-Webhook-Secret: <secret>` header (skipped only for the first provisional contact) | Robot pushes its status/pose updates here |
+| `POST /webhook/{robotKey}[/{source}]` | `X-Webhook-Secret: <secret>` header — a missing header is accepted, a *wrong* one is rejected (ATOM robots don't always send it) | Robot pushes its status/pose updates here; only the first path segment is the `{robotKey}` |
 | `GET /healthz` | none | `{"status":"ok","robots":[{"id","lastSeen","dataFresh"}]}` |
 | `GET /admin/robots` | `Authorization: Bearer <ADMIN_TOKEN>` | List all robots (with live `online` status) |
 | `POST /admin/robots` | `Authorization: Bearer <ADMIN_TOKEN>` | Register/update a robot (body = robot record JSON) |
@@ -145,4 +146,4 @@ The following Pi-host-specific components were **removed** in the cloud migratio
 
 The default values for `ADMIN_TOKEN`, `DEFAULT_ROBOT_SECRET`, and the MQTT credentials allow the service to start without any configuration. **You must change `ADMIN_TOKEN` and `DEFAULT_ROBOT_SECRET` (and ideally the MQTT credentials) before deploying to any publicly reachable host.**
 
-`/webhook/*` is intentionally public (robots POST to it). Front it with TLS and rely on the per-robot `X-Webhook-Secret` for authentication.
+`/webhook/*` is intentionally public (robots POST to it). Front it with TLS. The per-robot `X-Webhook-Secret` is enforced *only when the robot actually sends it* (ATOM firmware doesn't attach custom headers to its webhook POSTs, so the bridge fails open on a missing header and the `{robotKey}` path segment is the effective gate) — treat the webhook endpoint as low-trust and don't expose `/admin/*` publicly.

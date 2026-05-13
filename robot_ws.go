@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,11 +15,15 @@ import (
 )
 
 // RobotWSClient maintains a persistent WebSocket connection to the robot's
-// FastAPI server (port 8000). It subscribes to tracked_pose for real-time
-// position updates and exposes methods to send navigation commands.
+// FastAPI server. It subscribes to tracked_pose for real-time position updates
+// and exposes methods to send navigation / pose commands. When the robot doesn't
+// expose a FastAPI WebSocket, set fastapiWSURL to "disabled" (or "none"/"off"):
+// the client becomes a no-op (Start does nothing, send methods return an error)
+// instead of looping on a doomed reconnect.
 type RobotWSClient struct {
-	url   string
-	state *RobotState
+	url      string
+	disabled bool
+	state    *RobotState
 
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -26,29 +32,35 @@ type RobotWSClient struct {
 	stopOnce sync.Once
 }
 
+// wsDisabledSentinels are the fastapiWSURL values that turn the WS client off.
+var wsDisabledSentinels = map[string]bool{"disabled": true, "disable": true, "none": true, "off": true, "-": true}
+
 // NewRobotWSClient creates a new WebSocket client for the robot FastAPI.
 func NewRobotWSClient(cfg *Config, state *RobotState) *RobotWSClient {
+	c := &RobotWSClient{state: state, stopCh: make(chan struct{})}
+	if wsDisabledSentinels[strings.ToLower(strings.TrimSpace(cfg.RobotFastAPIWS))] {
+		c.disabled = true
+		return c
+	}
 	// Prefer the explicit WS URL; fall back to deriving from RobotFastAPI.
-	var wsURL string
 	if cfg.RobotFastAPIWS != "" {
-		wsURL = cfg.RobotFastAPIWS
+		c.url = cfg.RobotFastAPIWS
 	} else {
 		u, err := url.Parse(cfg.RobotFastAPI)
-		if err != nil {
-			u = &url.URL{Host: cfg.RobotIP + ":8000"}
+		if err != nil || u.Host == "" {
+			u = &url.URL{Host: net.JoinHostPort(cfg.RobotIP, cfg.RobotPort)}
 		}
-		wsURL = fmt.Sprintf("ws://%s/ws", u.Host)
+		c.url = fmt.Sprintf("ws://%s/ws", u.Host)
 	}
-
-	return &RobotWSClient{
-		url:    wsURL,
-		state:  state,
-		stopCh: make(chan struct{}),
-	}
+	return c
 }
 
 // Start launches the connection loop in background. It auto-reconnects.
 func (c *RobotWSClient) Start() {
+	if c.disabled {
+		log.Printf("[RobotWS] disabled (fastapiWSURL); not connecting")
+		return
+	}
 	go c.connectLoop()
 }
 
@@ -117,6 +129,9 @@ func (c *RobotWSClient) IsConnected() bool {
 // --- internal ---
 
 func (c *RobotWSClient) sendJSON(v interface{}) error {
+	if c.disabled {
+		return fmt.Errorf("robot WS disabled")
+	}
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()

@@ -12,3 +12,8 @@ mqtt_config.json
 
 # Robot config (contains IPs / secrets)
 robots.yaml
+
+# SQLite database (created in the working directory by default)
+*.db
+*.db-shm
+*.db-wal
